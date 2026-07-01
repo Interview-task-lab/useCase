@@ -811,9 +811,12 @@ function refreshPhoneScreen() {
   }
 }
 
+let mobileStudioMode = 'tap'; // 'tap' or 'assert'
+
 async function handlePhoneScreenClick(e) {
   const img = document.getElementById('phoneScreenImg');
   const spinner = document.getElementById('tapSpinner');
+  const spinnerText = document.getElementById('spinnerText');
   if (!img) return;
 
   const rect = img.getBoundingClientRect();
@@ -823,10 +826,18 @@ async function handlePhoneScreenClick(e) {
   const normX = clickX / rect.width;
   const normY = clickY / rect.height;
 
-  if (spinner) spinner.classList.remove('hidden');
+  if (spinner) {
+    if (spinnerText) {
+      spinnerText.textContent = mobileStudioMode === 'assert' 
+        ? '👁️ Inspecting UI element for visibility assertion...' 
+        : 'Tapping & inspecting UI elements...';
+    }
+    spinner.classList.remove('hidden');
+  }
 
   try {
-    const res = await fetch('/api/mobile/tap', {
+    const endpoint = mobileStudioMode === 'assert' ? '/api/mobile/assert-screen' : '/api/mobile/tap';
+    const res = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ normX, normY })
@@ -837,12 +848,16 @@ async function handlePhoneScreenClick(e) {
       renderSteps(currentResult.steps || []);
       const liveEditor = document.getElementById('liveCodeEditor');
       if (liveEditor) liveEditor.value = currentResult.code || '';
-      showToast('👆 Tapped element & recorded step!', 'success');
+      if (mobileStudioMode === 'assert') {
+        showToast('👁️ Added assertion step to script!', 'success');
+      } else {
+        showToast('👆 Tapped element & recorded step!', 'success');
+      }
     } else {
-      showToast(data.message || 'Tap failed', 'error');
+      showToast(data.message || (mobileStudioMode === 'assert' ? 'Assertion failed' : 'Tap failed'), 'error');
     }
   } catch (err) {
-    showToast('Tap failed: ' + err.message, 'error');
+    showToast((mobileStudioMode === 'assert' ? 'Assertion failed: ' : 'Tap failed: ') + err.message, 'error');
   } finally {
     if (spinner) spinner.classList.add('hidden');
     refreshPhoneScreen();
@@ -928,6 +943,78 @@ document.querySelectorAll('.phone-key-btn').forEach(btn => {
     if (key) handlePhoneKey(key);
   });
 });
+
+const modeTapBtn = document.getElementById('modeTapBtn');
+const modeAssertBtn = document.getElementById('modeAssertBtn');
+const phoneFrame = document.getElementById('phoneFrame');
+const overlayText = document.getElementById('overlayText');
+
+if (modeTapBtn && modeAssertBtn) {
+  modeTapBtn.addEventListener('click', () => {
+    mobileStudioMode = 'tap';
+    modeTapBtn.className = 'py-1.5 px-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 bg-gradient-to-r from-accent-600 to-indigo-600 text-white shadow-md transition-all';
+    modeAssertBtn.className = 'py-1.5 px-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 text-surface-400 hover:text-white transition-all';
+    if (phoneFrame) {
+      phoneFrame.classList.remove('border-purple-500', 'shadow-purple-500/30');
+      phoneFrame.classList.add('border-surface-700');
+    }
+    if (overlayText) {
+      overlayText.className = 'bg-black/80 text-white text-[10px] px-2 py-1 rounded-md font-mono shadow-lg';
+      overlayText.textContent = '👆 Click to Tap';
+    }
+    showToast('👆 Switched to Tap Mode', 'info');
+  });
+
+  modeAssertBtn.addEventListener('click', () => {
+    mobileStudioMode = 'assert';
+    modeAssertBtn.className = 'py-1.5 px-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 bg-gradient-to-r from-purple-600 to-pink-600 text-white shadow-md transition-all';
+    modeTapBtn.className = 'py-1.5 px-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 text-surface-400 hover:text-white transition-all';
+    if (phoneFrame) {
+      phoneFrame.classList.remove('border-surface-700');
+      phoneFrame.classList.add('border-purple-500', 'shadow-purple-500/30');
+    }
+    if (overlayText) {
+      overlayText.className = 'bg-purple-900/90 text-purple-200 text-[10px] px-2 py-1 rounded-md font-mono shadow-lg border border-purple-500/30';
+      overlayText.textContent = '👁️ Click to Assert Visible';
+    }
+    showToast('👁️ Switched to Assert Mode: Click an element on screen to assert visibility!', 'info');
+  });
+}
+
+const addAssertBtn = document.getElementById('addAssertBtn');
+if (addAssertBtn) {
+  addAssertBtn.addEventListener('click', async () => {
+    const typeSelect = document.getElementById('assertTypeSelect');
+    const valueInput = document.getElementById('assertValueInput');
+    if (!valueInput || !valueInput.value.trim()) {
+      showToast('Please enter an ID or text to assert', 'warning');
+      return;
+    }
+    const type = typeSelect ? typeSelect.value : 'visible-id';
+    const value = valueInput.value.trim();
+
+    try {
+      const res = await fetch('/api/mobile/assert-custom', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type, value })
+      });
+      const data = await res.json();
+      if (data.success && data.data) {
+        currentResult = data.data;
+        renderSteps(currentResult.steps || []);
+        const liveEditor = document.getElementById('liveCodeEditor');
+        if (liveEditor) liveEditor.value = currentResult.code || '';
+        valueInput.value = '';
+        showToast('⚡ Added assertion step!', 'success');
+      } else {
+        showToast(data.message || 'Failed to add assertion', 'error');
+      }
+    } catch (err) {
+      showToast('Error adding assertion: ' + err.message, 'error');
+    }
+  });
+}
 
 function stopMobileRecording() {
   stopPhoneAutoRefresh();

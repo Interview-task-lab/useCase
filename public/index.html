@@ -225,15 +225,25 @@
             </div>
           </div>
           
+          <!-- Studio Action Mode Selector -->
+          <div class="w-full max-w-[260px] bg-surface-900/80 p-1 rounded-xl border border-surface-700/80 grid grid-cols-2 gap-1 mb-3 shadow-inner">
+            <button id="modeTapBtn" type="button" class="py-1.5 px-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 bg-gradient-to-r from-accent-600 to-indigo-600 text-white shadow-md transition-all">
+              <span>👆</span> Tap Mode
+            </button>
+            <button id="modeAssertBtn" type="button" class="py-1.5 px-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 text-surface-400 hover:text-white transition-all">
+              <span>👁️</span> Assert Mode
+            </button>
+          </div>
+
           <!-- Phone Frame -->
-          <div class="relative border-4 border-surface-700 bg-black rounded-3xl overflow-hidden shadow-2xl flex items-center justify-center max-w-[260px] w-full aspect-[9/20] cursor-pointer group">
+          <div id="phoneFrame" class="relative border-4 border-surface-700 bg-black rounded-3xl overflow-hidden shadow-2xl flex items-center justify-center max-w-[260px] w-full aspect-[9/20] cursor-pointer group transition-all">
             <img id="phoneScreenImg" src="/api/mobile/screenshot" alt="Emulator Screen" class="w-full h-full object-contain select-none pointer-events-auto" />
             <div id="tapOverlay" class="absolute inset-0 bg-accent-500/10 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
-              <span class="bg-black/80 text-white text-[10px] px-2 py-1 rounded-md font-mono shadow-lg">👆 Click to Tap</span>
+              <span id="overlayText" class="bg-black/80 text-white text-[10px] px-2 py-1 rounded-md font-mono shadow-lg">👆 Click to Tap</span>
             </div>
             <div id="tapSpinner" class="absolute inset-0 bg-black/70 flex flex-col items-center justify-center text-white text-xs gap-2.5 z-20 hidden">
               <svg class="w-6 h-6 animate-spin text-accent-400" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>
-              <span class="font-medium text-center px-4">Tapping & inspecting UI elements...</span>
+              <span id="spinnerText" class="font-medium text-center px-4">Tapping & inspecting UI elements...</span>
             </div>
           </div>
 
@@ -247,6 +257,25 @@
               <button type="button" class="phone-key-btn btn-secondary text-[11px] py-1 text-center font-medium" data-key="ENTER">↵ Enter</button>
               <button type="button" class="phone-key-btn btn-secondary text-[11px] py-1 text-center font-medium" data-key="BACK">⬅ Back</button>
               <button type="button" class="phone-key-btn btn-secondary text-[11px] py-1 text-center font-medium" data-key="HOME">🏠 Home</button>
+            </div>
+
+            <!-- Quick Assert Bar -->
+            <div class="pt-2.5 border-t border-surface-700/60 space-y-1.5">
+              <div class="text-[10px] font-semibold uppercase tracking-wider text-purple-400 flex items-center gap-1">
+                <span>⚡</span> Quick Assertion
+              </div>
+              <div class="flex gap-1.5">
+                <select id="assertTypeSelect" class="input-field text-[11px] py-1 px-1.5 font-mono bg-surface-900 border-surface-700 w-28">
+                  <option value="visible-id">Visible (ID)</option>
+                  <option value="visible-text">Visible (Text)</option>
+                  <option value="not-visible-id">Not Visible (ID)</option>
+                  <option value="not-visible-text">Not Visible (Text)</option>
+                </select>
+                <input type="text" id="assertValueInput" placeholder="id or text..." class="input-field text-xs flex-1 py-1 px-2 font-mono" />
+              </div>
+              <button id="addAssertBtn" type="button" class="btn-secondary w-full text-xs py-1.5 bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 border border-purple-500/30 font-medium flex items-center justify-center gap-1.5 transition-all shadow-sm shadow-purple-500/10">
+                <span>➕</span> Add Assertion Step
+              </button>
             </div>
           </div>
         </div>

@@ -644,6 +644,124 @@ app.post('/api/mobile/key', (req, res) => {
   }
 });
 
+app.post('/api/mobile/assert-screen', (req, res) => {
+  const { normX, normY } = req.body;
+  const adb = getAdbBinary();
+  try {
+    let devW = 1080, devH = 2400;
+    try {
+      const sizeStr = require('child_process').execSync(`${adb} shell wm size`, { encoding: 'utf-8' });
+      const match = sizeStr.match(/(\d+)x(\d+)/);
+      if (match) { devW = parseInt(match[1], 10); devH = parseInt(match[2], 10); }
+    } catch (_) {}
+
+    const tapX = Math.round(normX * devW);
+    const tapY = Math.round(normY * devH);
+
+    let bestNode = null;
+    try {
+      require('child_process').execSync(`${adb} shell am force-stop dev.mobile.maestro && ${adb} shell am force-stop dev.mobile.maestro.test`, { stdio: 'ignore' });
+      require('child_process').execSync(`${adb} shell uiautomator dump /sdcard/window_dump.xml`, { stdio: 'ignore', timeout: 5000 });
+      const xml = require('child_process').execSync(`${adb} exec-out cat /sdcard/window_dump.xml`, { encoding: 'utf-8', maxBuffer: 5 * 1024 * 1024 });
+      
+      const regex = /<node\s+([^>]+)>/g;
+      let match;
+      let smallestArea = Infinity;
+
+      while ((match = regex.exec(xml)) !== null) {
+        const attrStr = match[1];
+        const boundsMatch = attrStr.match(/bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/);
+        if (!boundsMatch) continue;
+
+        const left = parseInt(boundsMatch[1], 10);
+        const top = parseInt(boundsMatch[2], 10);
+        const right = parseInt(boundsMatch[3], 10);
+        const bottom = parseInt(boundsMatch[4], 10);
+
+        if (tapX >= left && tapX <= right && tapY >= top && tapY <= bottom) {
+          const area = (right - left) * (bottom - top);
+          if (area < smallestArea && area > 0) {
+            const textMatch = attrStr.match(/text="([^"]*)"/);
+            const idMatch = attrStr.match(/resource-id="([^"]*)"/);
+            const descMatch = attrStr.match(/content-desc="([^"]*)"/);
+            
+            const text = textMatch ? textMatch[1] : '';
+            const resourceId = idMatch ? idMatch[1] : '';
+            const contentDesc = descMatch ? descMatch[1] : '';
+            
+            if (text || resourceId || contentDesc) {
+              bestNode = { text, resourceId, contentDesc, left, top, right, bottom, area };
+              smallestArea = area;
+            }
+          }
+        }
+      }
+    } catch (_) {}
+
+    if (!bestNode) {
+      return res.status(404).json({ success: false, message: 'No UI element found at clicked coordinate to assert.' });
+    }
+
+    let stepYaml = '';
+    if (bestNode.resourceId && bestNode.resourceId.trim() !== '' && !bestNode.resourceId.includes('android:id')) {
+      let resId = bestNode.resourceId.trim();
+      if (resId.includes(':id/')) resId = resId.split(':id/')[1];
+      stepYaml = `- assertVisible:\n    id: "${resId}"`;
+    } else if (bestNode.contentDesc && bestNode.contentDesc.trim() !== '') {
+      const desc = bestNode.contentDesc.trim();
+      if (!desc.includes(' ') && desc.length < 30) {
+        stepYaml = `- assertVisible:\n    id: "${desc}"`;
+      } else {
+        stepYaml = `- assertVisible: "${desc}"`;
+      }
+    } else if (bestNode.text && bestNode.text.trim() !== '') {
+      stepYaml = `- assertVisible: "${bestNode.text.trim()}"`;
+    } else if (bestNode.resourceId && bestNode.resourceId.trim() !== '') {
+      let resId = bestNode.resourceId.trim();
+      if (resId.includes(':id/')) resId = resId.split(':id/')[1];
+      stepYaml = `- assertVisible:\n    id: "${resId}"`;
+    } else {
+      return res.status(404).json({ success: false, message: 'Element at coordinate has no text, ID, or description to assert.' });
+    }
+
+    const outFile = getOutputFile();
+    let currentCode = fs.existsSync(outFile) ? fs.readFileSync(outFile, 'utf-8') : '';
+    currentCode = currentCode.trimEnd() + '\n' + stepYaml + '\n';
+    fs.writeFileSync(outFile, currentCode, 'utf-8');
+    const steps = parseCodeToSteps(currentCode, 'yaml');
+    return res.json({ success: true, step: stepYaml, data: { code: currentCode, steps, language: 'yaml' } });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.post('/api/mobile/assert-custom', (req, res) => {
+  const { type, value } = req.body;
+  if (!value || !value.trim()) {
+    return res.status(400).json({ success: false, message: 'Assertion value is required' });
+  }
+  const val = value.trim().replace(/"/g, '\\"');
+  let stepYaml = '';
+  if (type === 'visible-id') {
+    stepYaml = `- assertVisible:\n    id: "${val}"`;
+  } else if (type === 'visible-text') {
+    stepYaml = `- assertVisible: "${val}"`;
+  } else if (type === 'not-visible-id') {
+    stepYaml = `- assertNotVisible:\n    id: "${val}"`;
+  } else if (type === 'not-visible-text') {
+    stepYaml = `- assertNotVisible: "${val}"`;
+  } else {
+    stepYaml = `- assertVisible: "${val}"`;
+  }
+
+  const outFile = getOutputFile();
+  let currentCode = fs.existsSync(outFile) ? fs.readFileSync(outFile, 'utf-8') : '';
+  currentCode = currentCode.trimEnd() + '\n' + stepYaml + '\n';
+  fs.writeFileSync(outFile, currentCode, 'utf-8');
+  const steps = parseCodeToSteps(currentCode, 'yaml');
+  return res.json({ success: true, step: stepYaml, data: { code: currentCode, steps, language: 'yaml' } });
+});
+
 // ─── API: Save Test Case ─────────────────────────────────────────────────────
 app.post('/api/test-cases', async (req, res) => {
   let { name, url, language, code, steps, platform, app_path, device_name } = req.body;
