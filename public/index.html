@@ -201,8 +201,48 @@
         </button>
       </div>
 
-      <!-- Two-column results -->
-      <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+      <!-- Results Grid -->
+      <div id="resultsGrid" class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <!-- Live Mobile Screen Panel (Hidden by default for Web) -->
+        <div id="livePhonePanel" class="glass-card p-5 hidden flex-col items-center">
+          <div class="w-full flex items-center justify-between mb-3">
+            <h3 class="text-xs font-semibold uppercase tracking-wider text-surface-400 flex items-center gap-1.5">
+              <span>📱</span> Live Emulator Screen
+            </h3>
+            <div class="flex items-center gap-2">
+              <span id="phoneStatusIndicator" class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-mono flex items-center gap-1">
+                <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span> Live
+              </span>
+              <button id="refreshPhoneBtn" type="button" class="btn-ghost text-[11px] px-2 py-1">🔄 Refresh</button>
+            </div>
+          </div>
+          
+          <!-- Phone Frame -->
+          <div class="relative border-4 border-surface-700 bg-black rounded-3xl overflow-hidden shadow-2xl flex items-center justify-center max-w-[260px] w-full aspect-[9/20] cursor-pointer group">
+            <img id="phoneScreenImg" src="/api/mobile/screenshot" alt="Emulator Screen" class="w-full h-full object-contain select-none pointer-events-auto" />
+            <div id="tapOverlay" class="absolute inset-0 bg-accent-500/10 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
+              <span class="bg-black/80 text-white text-[10px] px-2 py-1 rounded-md font-mono shadow-lg">👆 Click to Tap</span>
+            </div>
+            <div id="tapSpinner" class="absolute inset-0 bg-black/70 flex flex-col items-center justify-center text-white text-xs gap-2.5 z-20 hidden">
+              <svg class="w-6 h-6 animate-spin text-accent-400" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>
+              <span class="font-medium text-center px-4">Tapping & inspecting UI elements...</span>
+            </div>
+          </div>
+
+          <!-- Quick Controls Below Phone -->
+          <div class="w-full mt-4 space-y-2.5 max-w-[260px]">
+            <div class="flex gap-1.5">
+              <input type="text" id="phoneTextInput" placeholder="Type text to send..." class="input-field text-xs flex-1 py-1.5 px-2.5 font-mono" />
+              <button id="sendTextBtn" type="button" class="btn-primary text-xs py-1.5 px-3 whitespace-nowrap bg-gradient-to-r from-accent-600 to-indigo-600">⌨️ Send</button>
+            </div>
+            <div class="grid grid-cols-3 gap-1.5">
+              <button type="button" class="phone-key-btn btn-secondary text-[11px] py-1 text-center font-medium" data-key="ENTER">↵ Enter</button>
+              <button type="button" class="phone-key-btn btn-secondary text-[11px] py-1 text-center font-medium" data-key="BACK">⬅ Back</button>
+              <button type="button" class="phone-key-btn btn-secondary text-[11px] py-1 text-center font-medium" data-key="HOME">🏠 Home</button>
+            </div>
+          </div>
+        </div>
+
         <!-- Left: Steps -->
         <div class="glass-card p-5">
           <h3 class="text-xs font-semibold uppercase tracking-wider text-surface-400 mb-4 flex items-center gap-2">

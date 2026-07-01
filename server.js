@@ -304,15 +304,11 @@ app.post('/api/record/start', (req, res) => {
   processError = null;
 
   if (targetPlatform === 'android' || targetPlatform === 'ios') {
-    console.log(`📱 Activating Maestro Studio Desktop App integration for ${targetPlatform.toUpperCase()}...`);
-    const appName = targetApp || 'com.example.app';
-    const devName = deviceName || (targetPlatform === 'android' ? 'Pixel_7' : 'iPhone 15');
+    console.log(`📱 Activating Live Web Mobile Studio for ${targetPlatform.toUpperCase()}...`);
+    const appName = targetApp || 'com.ismailaslan.flutter_login_app';
     const initialYaml = `appId: ${appName}
 ---
-# 📱 Maestro Studio Desktop App Integration (${targetPlatform.toUpperCase()})
-# 1. Open Maestro Studio Desktop App on your Mac
-# 2. Click on elements on your running emulator (${devName})
-# 3. Paste the recorded YAML steps here or edit directly!
+# 📱 Live Interactive Mobile Studio (${targetPlatform.toUpperCase()})
 - launchApp
 `;
     fs.writeFileSync(OUTPUT_FILE, initialYaml, 'utf-8');
@@ -322,8 +318,8 @@ app.post('/api/record/start', (req, res) => {
 
     return res.json({
       success: true,
-      mode: 'maestro-desktop',
-      message: `Maestro Studio Desktop App mode active for ${targetPlatform.toUpperCase()}! Open Maestro Studio Desktop App, click on your emulator, and paste/edit the generated YAML steps below!`,
+      mode: 'mobile-live',
+      message: `Live Mobile Studio started for ${targetPlatform.toUpperCase()}! Click directly on the phone screen below to record actions.`,
     });
   } else {
     const args = ['playwright', 'codegen', url, `--target=${targetLang}`, `--output=${OUTPUT_FILE}`];
@@ -457,9 +453,161 @@ app.post('/api/record/update-code', (req, res) => {
       code,
       steps,
       url: lastRecordingUrl,
-      language: lang,
     },
   });
+});
+
+// ─── API: Live Mobile Studio Endpoints (ADB / Emulator) ──────────────────────
+function getAdbBinary() {
+  const home = process.env.HOME || process.env.USERPROFILE || '';
+  const possiblePaths = [
+    path.join(home, 'Library', 'Android', 'sdk', 'platform-tools', 'adb'),
+    '/usr/local/bin/adb',
+    '/opt/homebrew/bin/adb',
+    'adb'
+  ];
+  for (const p of possiblePaths) {
+    try {
+      if (fs.existsSync(p)) return p;
+    } catch (_) {}
+  }
+  return 'adb';
+}
+
+app.get('/api/mobile/screenshot', (req, res) => {
+  const adb = getAdbBinary();
+  try {
+    const imgBuffer = require('child_process').execSync(`${adb} exec-out screencap -p`, { maxBuffer: 10 * 1024 * 1024 });
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    return res.send(imgBuffer);
+  } catch (e) {
+    return res.status(500).send('Screenshot failed: ' + e.message);
+  }
+});
+
+app.post('/api/mobile/tap', (req, res) => {
+  const { normX, normY } = req.body;
+  const adb = getAdbBinary();
+  try {
+    let devW = 1080, devH = 2400;
+    try {
+      const sizeStr = require('child_process').execSync(`${adb} shell wm size`, { encoding: 'utf-8' });
+      const match = sizeStr.match(/(\d+)x(\d+)/);
+      if (match) { devW = parseInt(match[1], 10); devH = parseInt(match[2], 10); }
+    } catch (_) {}
+
+    const tapX = Math.round(normX * devW);
+    const tapY = Math.round(normY * devH);
+
+    let bestNode = null;
+    try {
+      require('child_process').execSync(`${adb} shell uiautomator dump /sdcard/window_dump.xml`, { stdio: 'ignore', timeout: 3000 });
+      const xml = require('child_process').execSync(`${adb} exec-out cat /sdcard/window_dump.xml`, { encoding: 'utf-8', maxBuffer: 5 * 1024 * 1024 });
+      
+      const regex = /<node\s+([^>]+)>/g;
+      let match;
+      let smallestArea = Infinity;
+
+      while ((match = regex.exec(xml)) !== null) {
+        const attrStr = match[1];
+        const boundsMatch = attrStr.match(/bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/);
+        if (!boundsMatch) continue;
+
+        const left = parseInt(boundsMatch[1], 10);
+        const top = parseInt(boundsMatch[2], 10);
+        const right = parseInt(boundsMatch[3], 10);
+        const bottom = parseInt(boundsMatch[4], 10);
+
+        if (tapX >= left && tapX <= right && tapY >= top && tapY <= bottom) {
+          const area = (right - left) * (bottom - top);
+          if (area < smallestArea && area > 0) {
+            const textMatch = attrStr.match(/text="([^"]*)"/);
+            const idMatch = attrStr.match(/resource-id="([^"]*)"/);
+            const descMatch = attrStr.match(/content-desc="([^"]*)"/);
+            
+            const text = textMatch ? textMatch[1] : '';
+            const resourceId = idMatch ? idMatch[1] : '';
+            const contentDesc = descMatch ? descMatch[1] : '';
+            
+            if (text || resourceId || contentDesc) {
+              bestNode = { text, resourceId, contentDesc, left, top, right, bottom, area };
+              smallestArea = area;
+            }
+          }
+        }
+      }
+    } catch (_) {}
+
+    require('child_process').execSync(`${adb} shell input tap ${tapX} ${tapY}`, { stdio: 'ignore' });
+
+    let stepYaml = `- tapOn:\n    point: "${tapX},${tapY}"`;
+    if (bestNode) {
+      if (bestNode.contentDesc && bestNode.contentDesc.trim() !== '') {
+        const desc = bestNode.contentDesc.trim();
+        if (!desc.includes(' ') && desc.length < 30) {
+          stepYaml = `- tapOn:\n    id: "${desc}"`;
+        } else {
+          stepYaml = `- tapOn: "${desc}"`;
+        }
+      } else if (bestNode.text && bestNode.text.trim() !== '') {
+        stepYaml = `- tapOn: "${bestNode.text.trim()}"`;
+      } else if (bestNode.resourceId && bestNode.resourceId.trim() !== '') {
+        let resId = bestNode.resourceId.trim();
+        if (resId.includes(':id/')) resId = resId.split(':id/')[1];
+        stepYaml = `- tapOn:\n    id: "${resId}"`;
+      }
+    }
+
+    let currentCode = fs.existsSync(OUTPUT_FILE) ? fs.readFileSync(OUTPUT_FILE, 'utf-8') : '';
+    currentCode = currentCode.trimEnd() + '\n' + stepYaml + '\n';
+    fs.writeFileSync(OUTPUT_FILE, currentCode, 'utf-8');
+
+    const steps = parseCodeToSteps(currentCode, 'yaml');
+
+    return res.json({
+      success: true,
+      step: stepYaml,
+      data: { code: currentCode, steps, language: 'yaml' }
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.post('/api/mobile/input-text', (req, res) => {
+  const { text } = req.body;
+  const adb = getAdbBinary();
+  try {
+    require('child_process').execSync(`${adb} shell input text "${(text || '').replace(/"/g, '\\"')}"`, { stdio: 'ignore' });
+    const stepYaml = `- inputText: "${text || ''}"`;
+    let currentCode = fs.existsSync(OUTPUT_FILE) ? fs.readFileSync(OUTPUT_FILE, 'utf-8') : '';
+    currentCode = currentCode.trimEnd() + '\n' + stepYaml + '\n';
+    fs.writeFileSync(OUTPUT_FILE, currentCode, 'utf-8');
+    const steps = parseCodeToSteps(currentCode, 'yaml');
+    return res.json({ success: true, data: { code: currentCode, steps, language: 'yaml' } });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.post('/api/mobile/key', (req, res) => {
+  const { key } = req.body;
+  const adb = getAdbBinary();
+  try {
+    let keycode = 66, keyName = 'Enter';
+    if (key === 'BACK') { keycode = 4; keyName = 'Back'; }
+    if (key === 'HOME') { keycode = 3; keyName = 'Home'; }
+    require('child_process').execSync(`${adb} shell input keyevent ${keycode}`, { stdio: 'ignore' });
+    const stepYaml = `- pressKey: ${keyName}`;
+    let currentCode = fs.existsSync(OUTPUT_FILE) ? fs.readFileSync(OUTPUT_FILE, 'utf-8') : '';
+    currentCode = currentCode.trimEnd() + '\n' + stepYaml + '\n';
+    fs.writeFileSync(OUTPUT_FILE, currentCode, 'utf-8');
+    const steps = parseCodeToSteps(currentCode, 'yaml');
+    return res.json({ success: true, data: { code: currentCode, steps, language: 'yaml' } });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
 });
 
 // ─── API: Save Test Case ─────────────────────────────────────────────────────

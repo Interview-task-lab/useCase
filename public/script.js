@@ -101,30 +101,61 @@ async function startRecording() {
       return;
     }
 
+    if (data.mode === 'mobile-live') {
+      showToast(`📱 Live Web Mobile Studio started for ${currentPlatform.toUpperCase()}!`, 'success');
+      setStatusBadge('recording');
+      recordingBanner.classList.remove('hidden');
+      const bannerTitle = recordingBanner.querySelector('h3');
+      const bannerDesc = recordingBanner.querySelector('p');
+      if (bannerTitle) bannerTitle.innerHTML = `📱 Live Interactive Mobile Studio (${currentPlatform.toUpperCase()})`;
+      if (bannerDesc) bannerDesc.innerHTML = `
+        ⚡ You are connected directly to the running emulator!<br/>
+        👆 <strong>Click directly on the Live Phone Screen below</strong> to tap elements, type text, or press keys.<br/>
+        YAML commands and step descriptions will generate automatically in real-time!
+      `;
+
+      resultsSection.classList.remove('hidden');
+      resultsSection.classList.add('fade-in');
+
+      const resultsGrid = document.getElementById('resultsGrid');
+      const livePhonePanel = document.getElementById('livePhonePanel');
+      if (resultsGrid) resultsGrid.className = 'grid grid-cols-1 lg:grid-cols-3 gap-5';
+      if (livePhonePanel) {
+        livePhonePanel.classList.remove('hidden');
+        livePhonePanel.classList.add('flex');
+      }
+
+      refreshPhoneScreen();
+      startPhoneAutoRefresh();
+
+      try {
+        const statusRes = await fetch('/api/record/status');
+        const statusData = await statusRes.json();
+        if (statusData.data) {
+          currentResult = statusData.data;
+          renderSteps(currentResult.steps || []);
+          const liveEditor = document.getElementById('liveCodeEditor');
+          const codePre = document.getElementById('codePre');
+          const badge = document.getElementById('codeEditBadge');
+          const title = document.getElementById('codeHeaderTitle');
+          if (liveEditor && codePre) {
+            liveEditor.classList.remove('hidden');
+            codePre.classList.add('hidden');
+            if (badge) badge.classList.remove('hidden');
+            if (title) title.textContent = 'Maestro YAML Live Editor';
+            liveEditor.value = currentResult.code || '';
+          }
+        }
+      } catch (_) {}
+
+      resetStartButton();
+      return;
+    }
+
     showToast(`Recording started for ${currentPlatform.toUpperCase()}!`, 'success');
     setStatusBadge('recording');
     recordingBanner.classList.remove('hidden');
     resultsSection.classList.add('hidden');
-
-    if (currentPlatform !== 'web') {
-      const bannerTitle = recordingBanner.querySelector('h3');
-      const bannerDesc = recordingBanner.querySelector('p');
-      if (bannerTitle) bannerTitle.innerHTML = `📱 Maestro Studio Desktop App Mode Active (${currentPlatform.toUpperCase()})`;
-      if (bannerDesc) bannerDesc.innerHTML = `
-        1️⃣ Launch <strong class="text-white">Maestro Studio Desktop App</strong> on your Mac.<br/>
-        2️⃣ Click on elements on your running emulator (<strong>${deviceName || 'Pixel_7'}</strong>).<br/>
-        3️⃣ Copy the generated YAML steps from Maestro Studio and <strong class="text-white">paste them into the Live Editor box below!</strong>
-      `;
-    } else {
-      const bannerTitle = recordingBanner.querySelector('h3');
-      const bannerDesc = recordingBanner.querySelector('p');
-      if (bannerTitle) bannerTitle.innerHTML = `Recording Session Active`;
-      if (bannerDesc) bannerDesc.innerHTML = `
-        The Playwright browser window has opened locally on your desktop.<br/>
-        Execute your test actions in that window. Once finished, <strong class="text-white">close the browser window</strong> to generate your test script.
-      `;
-    }
-
     if (btn) {
       btn.disabled = true;
       btn.innerHTML = `
@@ -659,9 +690,18 @@ function setPlatform(platform) {
 
   const webControls = document.getElementById('webControls');
   const mobileControls = document.getElementById('mobileControls');
+  const resultsGrid = document.getElementById('resultsGrid');
+  const livePhonePanel = document.getElementById('livePhonePanel');
+
   if (platform === 'web') {
     if (webControls) webControls.classList.remove('hidden');
     if (mobileControls) mobileControls.classList.add('hidden');
+    if (resultsGrid) resultsGrid.className = 'grid grid-cols-1 lg:grid-cols-2 gap-5';
+    if (livePhonePanel) {
+      livePhonePanel.classList.add('hidden');
+      livePhonePanel.classList.remove('flex');
+    }
+    stopPhoneAutoRefresh();
   } else {
     if (webControls) webControls.classList.add('hidden');
     if (mobileControls) mobileControls.classList.remove('hidden');
@@ -732,6 +772,146 @@ if (urlInput) {
     if (e.key === 'Enter') startRecording();
   });
 }
+
+// ─── Live Mobile Phone Screen Helpers ────────────────────────────────────────
+let phoneRefreshTimer = null;
+
+function startPhoneAutoRefresh() {
+  stopPhoneAutoRefresh();
+  phoneRefreshTimer = setInterval(refreshPhoneScreen, 2500);
+}
+
+function stopPhoneAutoRefresh() {
+  if (phoneRefreshTimer) {
+    clearInterval(phoneRefreshTimer);
+    phoneRefreshTimer = null;
+  }
+}
+
+function refreshPhoneScreen() {
+  const img = document.getElementById('phoneScreenImg');
+  if (img) {
+    img.src = `/api/mobile/screenshot?t=${Date.now()}`;
+  }
+}
+
+async function handlePhoneScreenClick(e) {
+  const img = document.getElementById('phoneScreenImg');
+  const spinner = document.getElementById('tapSpinner');
+  if (!img) return;
+
+  const rect = img.getBoundingClientRect();
+  const clickX = e.clientX - rect.left;
+  const clickY = e.clientY - rect.top;
+
+  const normX = clickX / rect.width;
+  const normY = clickY / rect.height;
+
+  if (spinner) spinner.classList.remove('hidden');
+
+  try {
+    const res = await fetch('/api/mobile/tap', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ normX, normY })
+    });
+    const data = await res.json();
+    if (data.success && data.data) {
+      currentResult = data.data;
+      renderSteps(currentResult.steps || []);
+      const liveEditor = document.getElementById('liveCodeEditor');
+      if (liveEditor) liveEditor.value = currentResult.code || '';
+      showToast('👆 Tapped element & recorded step!', 'success');
+    } else {
+      showToast(data.message || 'Tap failed', 'error');
+    }
+  } catch (err) {
+    showToast('Tap failed: ' + err.message, 'error');
+  } finally {
+    if (spinner) spinner.classList.add('hidden');
+    refreshPhoneScreen();
+  }
+}
+
+async function handleSendText() {
+  const input = document.getElementById('phoneTextInput');
+  const spinner = document.getElementById('tapSpinner');
+  if (!input || !input.value.trim()) return;
+
+  const text = input.value.trim();
+  if (spinner) spinner.classList.remove('hidden');
+
+  try {
+    const res = await fetch('/api/mobile/input-text', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text })
+    });
+    const data = await res.json();
+    if (data.success && data.data) {
+      currentResult = data.data;
+      renderSteps(currentResult.steps || []);
+      const liveEditor = document.getElementById('liveCodeEditor');
+      if (liveEditor) liveEditor.value = currentResult.code || '';
+      input.value = '';
+      showToast(`⌨️ Sent text: "${text}"`, 'success');
+    }
+  } catch (err) {
+    showToast('Send text failed: ' + err.message, 'error');
+  } finally {
+    if (spinner) spinner.classList.add('hidden');
+    refreshPhoneScreen();
+  }
+}
+
+async function handlePhoneKey(key) {
+  const spinner = document.getElementById('tapSpinner');
+  if (spinner) spinner.classList.remove('hidden');
+
+  try {
+    const res = await fetch('/api/mobile/key', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key })
+    });
+    const data = await res.json();
+    if (data.success && data.data) {
+      currentResult = data.data;
+      renderSteps(currentResult.steps || []);
+      const liveEditor = document.getElementById('liveCodeEditor');
+      if (liveEditor) liveEditor.value = currentResult.code || '';
+      showToast(`🔘 Pressed key: ${key}`, 'success');
+    }
+  } catch (err) {
+    showToast('Press key failed: ' + err.message, 'error');
+  } finally {
+    if (spinner) spinner.classList.add('hidden');
+    refreshPhoneScreen();
+  }
+}
+
+const phoneImg = document.getElementById('phoneScreenImg');
+if (phoneImg) phoneImg.addEventListener('click', handlePhoneScreenClick);
+
+const refreshPhoneBtn = document.getElementById('refreshPhoneBtn');
+if (refreshPhoneBtn) refreshPhoneBtn.addEventListener('click', refreshPhoneScreen);
+
+const sendTextBtn = document.getElementById('sendTextBtn');
+if (sendTextBtn) sendTextBtn.addEventListener('click', handleSendText);
+
+const phoneTextInput = document.getElementById('phoneTextInput');
+if (phoneTextInput) {
+  phoneTextInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') handleSendText();
+  });
+}
+
+document.querySelectorAll('.phone-key-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const key = btn.getAttribute('data-key');
+    if (key) handlePhoneKey(key);
+  });
+});
 
 async function loadConfig() {
   try {
