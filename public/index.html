@@ -215,11 +215,15 @@
         </div>
         <!-- Right: Code -->
         <div class="glass-card p-5">
-          <h3 class="text-xs font-semibold uppercase tracking-wider text-surface-400 mb-4 flex items-center gap-2">
-            <svg class="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/></svg>
-            Generated Code
-          </h3>
-          <pre class="code-block max-h-[500px] overflow-y-auto custom-scrollbar"><code id="codeOutput" class="text-sm font-mono"></code></pre>
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-xs font-semibold uppercase tracking-wider text-surface-400 flex items-center gap-2">
+              <svg class="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/></svg>
+              <span id="codeHeaderTitle">Generated Code</span>
+            </h3>
+            <span id="codeEditBadge" class="text-[11px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-medium hidden">✨ Editable (Auto-updates steps)</span>
+          </div>
+          <textarea id="liveCodeEditor" placeholder="Paste or edit your Maestro YAML steps here..." class="w-full bg-surface-900/95 border border-surface-700/80 rounded-xl p-4 text-sm font-mono text-emerald-300 focus:outline-none focus:border-accent-500/60 min-h-[400px] max-h-[500px] custom-scrollbar hidden leading-relaxed"></textarea>
+          <pre id="codePre block" class="code-block max-h-[500px] overflow-y-auto custom-scrollbar"><code id="codeOutput" class="text-sm font-mono"></code></pre>
         </div>
       </div>
     </section>

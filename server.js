@@ -304,52 +304,26 @@ app.post('/api/record/start', (req, res) => {
   processError = null;
 
   if (targetPlatform === 'android' || targetPlatform === 'ios') {
-    let hasMaestroCli = false;
-    try {
-      require('child_process').execSync('which maestro || maestro --version', { stdio: 'ignore' });
-      hasMaestroCli = true;
-    } catch (e) {
-      hasMaestroCli = false;
-    }
-
-    if (!hasMaestroCli) {
-      console.log(`📱 Maestro CLI/Studio not found locally. Using Standalone Maestro Studio Assistant mode for ${targetPlatform}...`);
-      const appName = targetApp || 'com.example.app';
-      const devName = deviceName || (targetPlatform === 'android' ? 'Pixel_6_API_33' : 'iPhone 15');
-      const templateYaml = `appId: ${appName}
+    console.log(`📱 Activating Maestro Studio Desktop App integration for ${targetPlatform.toUpperCase()}...`);
+    const appName = targetApp || 'com.example.app';
+    const devName = deviceName || (targetPlatform === 'android' ? 'Pixel_7' : 'iPhone 15');
+    const initialYaml = `appId: ${appName}
 ---
-# 📱 Maestro Studio (${targetPlatform.toUpperCase()}) - Test Flow for ${devName}
+# 📱 Maestro Studio Desktop App Integration (${targetPlatform.toUpperCase()})
+# 1. Open Maestro Studio Desktop App on your Mac
+# 2. Click on elements on your running emulator (${devName})
+# 3. Paste the recorded YAML steps here or edit directly!
 - launchApp
-- assertVisible: "Ana Sayfa"
-- tapOn:
-    id: "search-input"
-- inputText: "İstanbul"
-- tapOn: "Ara"
-- scrollUntilVisible:
-    element:
-      text: "En Ucuz Uçuş"
-    direction: DOWN
-- tapOn: "Seç"
-- assertVisible: "Özet Ekranı"
 `;
-      fs.writeFileSync(OUTPUT_FILE, templateYaml, 'utf-8');
+    fs.writeFileSync(OUTPUT_FILE, initialYaml, 'utf-8');
 
-      processExited = true;
-      processExitCode = 0;
+    processExited = true;
+    processExitCode = 0;
 
-      return res.json({
-        success: true,
-        message: `Maestro Standalone Studio mode activated for ${targetPlatform.toUpperCase()} (${appName}). A template YAML test flow has been generated!`,
-      });
-    }
-
-    const args = ['studio', '--port=9999'];
-    console.log(`📱 Starting Maestro Studio (${targetPlatform}): maestro ${args.join(' ')}`);
-
-    activeProcess = spawn('maestro', args, {
-      cwd: __dirname,
-      stdio: 'pipe',
-      shell: true,
+    return res.json({
+      success: true,
+      mode: 'maestro-desktop',
+      message: `Maestro Studio Desktop App mode active for ${targetPlatform.toUpperCase()}! Open Maestro Studio Desktop App, click on your emulator, and paste/edit the generated YAML steps below!`,
     });
   } else {
     const args = ['playwright', 'codegen', url, `--target=${targetLang}`, `--output=${OUTPUT_FILE}`];
@@ -466,6 +440,28 @@ app.get('/api/record/status', (req, res) => {
   });
 });
 
+// ─── API: Update Recorded/Edited Code ────────────────────────────────────────
+app.post('/api/record/update-code', (req, res) => {
+  const { code, language } = req.body;
+  if (typeof code !== 'string') {
+    return res.status(400).json({ success: false, message: 'Invalid code' });
+  }
+  const lang = language || lastRecordingLanguage || 'yaml';
+  try {
+    fs.writeFileSync(OUTPUT_FILE, code, 'utf-8');
+  } catch (_) {}
+  const steps = parseCodeToSteps(code, lang);
+  return res.json({
+    success: true,
+    data: {
+      code,
+      steps,
+      url: lastRecordingUrl,
+      language: lang,
+    },
+  });
+});
+
 // ─── API: Save Test Case ─────────────────────────────────────────────────────
 app.post('/api/test-cases', async (req, res) => {
   let { name, url, language, code, steps, platform, app_path, device_name } = req.body;
@@ -539,11 +535,11 @@ app.post('/api/test-cases/:id/run', async (req, res) => {
     const tc = result.rows[0];
     const language = tc.language || 'javascript';
 
-    // Only JavaScript tests can be run directly
-    if (!['javascript', 'playwright-test'].includes(language)) {
+    // Allow JavaScript, Playwright Test, and YAML (Maestro)
+    if (!['javascript', 'playwright-test', 'yaml'].includes(language)) {
       return res.status(400).json({
         success: false,
-        message: `Running ${language} tests is not supported yet. Only JavaScript tests can be run.`,
+        message: `Running ${language} tests is not supported yet.`,
       });
     }
 
@@ -569,9 +565,14 @@ app.post('/api/test-cases/:id/run', async (req, res) => {
 
       console.log(`▶️  Running mobile test #${testId} (${tc.platform}): "${tc.name}"`);
 
+      const home = process.env.HOME || process.env.USERPROFILE || '';
+      const maestroBin = fs.existsSync(path.join(home, '.maestro', 'bin', 'maestro'))
+        ? path.join(home, '.maestro', 'bin', 'maestro')
+        : 'maestro';
+
       let hasMaestroCli = false;
       try {
-        require('child_process').execSync('which maestro || maestro --version', { stdio: 'ignore' });
+        require('child_process').execSync(`${maestroBin} --version`, { stdio: 'ignore' });
         hasMaestroCli = true;
       } catch (e) {
         hasMaestroCli = false;
@@ -621,7 +622,7 @@ app.post('/api/test-cases/:id/run', async (req, res) => {
       }
 
       const args = ['test', yamlFile, '--format', 'html', '--output', path.join(reportDir, 'index.html')];
-      runnerProcess = spawn('maestro', args, {
+      runnerProcess = spawn(maestroBin, args, {
         cwd: __dirname,
         stdio: 'pipe',
         shell: true,

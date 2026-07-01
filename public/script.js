@@ -105,6 +105,26 @@ async function startRecording() {
     setStatusBadge('recording');
     recordingBanner.classList.remove('hidden');
     resultsSection.classList.add('hidden');
+
+    if (currentPlatform !== 'web') {
+      const bannerTitle = recordingBanner.querySelector('h3');
+      const bannerDesc = recordingBanner.querySelector('p');
+      if (bannerTitle) bannerTitle.innerHTML = `📱 Maestro Studio Desktop App Mode Active (${currentPlatform.toUpperCase()})`;
+      if (bannerDesc) bannerDesc.innerHTML = `
+        1️⃣ Launch <strong class="text-white">Maestro Studio Desktop App</strong> on your Mac.<br/>
+        2️⃣ Click on elements on your running emulator (<strong>${deviceName || 'Pixel_7'}</strong>).<br/>
+        3️⃣ Copy the generated YAML steps from Maestro Studio and <strong class="text-white">paste them into the Live Editor box below!</strong>
+      `;
+    } else {
+      const bannerTitle = recordingBanner.querySelector('h3');
+      const bannerDesc = recordingBanner.querySelector('p');
+      if (bannerTitle) bannerTitle.innerHTML = `Recording Session Active`;
+      if (bannerDesc) bannerDesc.innerHTML = `
+        The Playwright browser window has opened locally on your desktop.<br/>
+        Execute your test actions in that window. Once finished, <strong class="text-white">close the browser window</strong> to generate your test script.
+      `;
+    }
+
     if (btn) {
       btn.disabled = true;
       btn.innerHTML = `
@@ -182,8 +202,27 @@ function onRecordingComplete(data) {
   // Render steps
   renderSteps(currentResult.steps);
 
-  // Render code
-  codeOutput.textContent = currentResult.code;
+  // Render code & check live editor
+  const liveEditor = document.getElementById('liveCodeEditor');
+  const codePre = document.getElementById('codePre');
+  const badge = document.getElementById('codeEditBadge');
+  const title = document.getElementById('codeHeaderTitle');
+
+  if (currentPlatform !== 'web' && liveEditor && codePre) {
+    liveEditor.classList.remove('hidden');
+    codePre.classList.add('hidden');
+    if (badge) badge.classList.remove('hidden');
+    if (title) title.textContent = 'Maestro YAML Live Editor';
+    liveEditor.value = currentResult.code || '';
+  } else if (liveEditor && codePre) {
+    liveEditor.classList.add('hidden');
+    codePre.classList.remove('hidden');
+    if (badge) badge.classList.add('hidden');
+    if (title) title.textContent = 'Generated Code';
+    codeOutput.textContent = currentResult.code || '';
+  } else {
+    codeOutput.textContent = currentResult.code || '';
+  }
 
   // Show results
   resultsSection.classList.remove('hidden');
@@ -653,6 +692,33 @@ if (newRecordingBtn) newRecordingBtn.addEventListener('click', newRecording);
 if (saveTestBtn) saveTestBtn.addEventListener('click', saveTest);
 if (refreshTestsBtn) refreshTestsBtn.addEventListener('click', loadSavedTests);
 if (closeModalBtn) closeModalBtn.addEventListener('click', closeModal);
+
+const liveCodeEditor = document.getElementById('liveCodeEditor');
+if (liveCodeEditor) {
+  let debounceTimer = null;
+  liveCodeEditor.addEventListener('input', () => {
+    if (currentResult) {
+      currentResult.code = liveCodeEditor.value;
+    }
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(async () => {
+      try {
+        const res = await fetch('/api/record/update-code', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: liveCodeEditor.value, language: 'yaml' }),
+        });
+        const data = await res.json();
+        if (data.success && data.data && data.data.steps) {
+          if (currentResult) currentResult.steps = data.data.steps;
+          renderSteps(data.data.steps);
+        }
+      } catch (e) {
+        console.warn('Live code update failed:', e);
+      }
+    }, 500);
+  });
+}
 
 if (detailModal) {
   detailModal.addEventListener('click', (e) => {
