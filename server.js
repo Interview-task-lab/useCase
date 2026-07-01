@@ -483,7 +483,7 @@ app.post('/api/record/update-code', (req, res) => {
   });
 });
 
-// ─── API: Live Mobile Studio Endpoints (ADB / Emulator) ──────────────────────
+// ─── API: Live Mobile Studio Endpoints (ADB / Simulator) ─────────────────────
 function getAdbBinary() {
   const home = process.env.HOME || process.env.USERPROFILE || '';
   const possiblePaths = [
@@ -500,10 +500,32 @@ function getAdbBinary() {
   return 'adb';
 }
 
-app.get('/api/mobile/screenshot', (req, res) => {
-  const adb = getAdbBinary();
+function getBootedSimulatorUDID() {
   try {
-    const imgBuffer = require('child_process').execSync(`${adb} exec-out screencap -p`, { maxBuffer: 10 * 1024 * 1024 });
+    const out = require('child_process').execSync('xcrun simctl list devices booted --json', { encoding: 'utf-8' });
+    const json = JSON.parse(out);
+    for (const runtime of Object.values(json.devices || {})) {
+      for (const device of runtime) {
+        if (device.state === 'Booted') return device.udid;
+      }
+    }
+  } catch (_) {}
+  return 'booted';
+}
+
+app.get('/api/mobile/screenshot', (req, res) => {
+  const platform = lastRecordingPlatform;
+  try {
+    let imgBuffer;
+    if (platform === 'ios') {
+      const tmpFile = path.join(TEMP_DIR, `sim_screen_${Date.now()}.png`);
+      require('child_process').execSync(`xcrun simctl io booted screenshot "${tmpFile}"`, { stdio: 'ignore' });
+      imgBuffer = fs.readFileSync(tmpFile);
+      try { fs.unlinkSync(tmpFile); } catch (_) {}
+    } else {
+      const adb = getAdbBinary();
+      imgBuffer = require('child_process').execSync(`${adb} exec-out screencap -p`, { maxBuffer: 10 * 1024 * 1024 });
+    }
     res.setHeader('Content-Type', 'image/png');
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
     return res.send(imgBuffer);
@@ -514,8 +536,30 @@ app.get('/api/mobile/screenshot', (req, res) => {
 
 app.post('/api/mobile/tap', (req, res) => {
   const { normX, normY } = req.body;
+  const platform = lastRecordingPlatform;
   const adb = getAdbBinary();
   try {
+    // iOS simulator tap
+    if (platform === 'ios') {
+      let simW = 390, simH = 844;
+      try {
+        const tmpFile = path.join(TEMP_DIR, `sim_screen_tap_${Date.now()}.png`);
+        require('child_process').execSync(`xcrun simctl io booted screenshot "${tmpFile}"`, { stdio: 'ignore' });
+        // Use default iPhone 15 resolution
+        try { fs.unlinkSync(tmpFile); } catch (_) {}
+      } catch (_) {}
+      const tapX = Math.round(normX * simW);
+      const tapY = Math.round(normY * simH);
+      require('child_process').execSync(`xcrun simctl io booted tap ${tapX} ${tapY}`, { stdio: 'ignore' });
+      const stepYaml = `- tapOn:\n    point: "${tapX},${tapY}"`;
+      const outFile = getOutputFile();
+      let currentCode = fs.existsSync(outFile) ? fs.readFileSync(outFile, 'utf-8') : '';
+      currentCode = currentCode.trimEnd() + '\n' + stepYaml + '\n';
+      fs.writeFileSync(outFile, currentCode, 'utf-8');
+      const steps = parseCodeToSteps(currentCode, 'yaml');
+      return res.json({ success: true, data: { code: currentCode, steps, language: 'yaml' } });
+    }
+
     let devW = 1080, devH = 2400;
     try {
       const sizeStr = require('child_process').execSync(`${adb} shell wm size`, { encoding: 'utf-8' });
@@ -609,9 +653,16 @@ app.post('/api/mobile/tap', (req, res) => {
 
 app.post('/api/mobile/input-text', (req, res) => {
   const { text } = req.body;
+  const platform = lastRecordingPlatform;
   const adb = getAdbBinary();
   try {
-    require('child_process').execSync(`${adb} shell input text "${(text || '').replace(/"/g, '\\"')}"`, { stdio: 'ignore' });
+    if (platform === 'ios') {
+      // xcrun simctl keyboard type doesn't exist; use osascript or ADB isn't available
+      // We still write the YAML step; real input will happen via Maestro at run time
+      console.log(`[iOS] inputText: "${text}" will be performed by Maestro at runtime.`);
+    } else {
+      require('child_process').execSync(`${adb} shell input text "${(text || '').replace(/"/g, '\\"')}"`, { stdio: 'ignore' });
+    }
     const stepYaml = `- inputText: "${text || ''}"`;
     const outFile = getOutputFile();
     let currentCode = fs.existsSync(outFile) ? fs.readFileSync(outFile, 'utf-8') : '';
@@ -626,13 +677,15 @@ app.post('/api/mobile/input-text', (req, res) => {
 
 app.post('/api/mobile/key', (req, res) => {
   const { key } = req.body;
+  const platform = lastRecordingPlatform;
   const adb = getAdbBinary();
   try {
-    let keycode = 66, keyName = 'Enter';
-    if (key === 'BACK') { keycode = 4; keyName = 'Back'; }
-    if (key === 'HOME') { keycode = 3; keyName = 'Home'; }
-    require('child_process').execSync(`${adb} shell input keyevent ${keycode}`, { stdio: 'ignore' });
-    const stepYaml = `- pressKey: ${keyName}`;
+    const keyMap = { 'ENTER': 66, 'BACK': 4, 'HOME': 3, 'TAB': 61, 'DELETE': 67 };
+    const keyCode = keyMap[key.toUpperCase()] || 66;
+    if (platform !== 'ios') {
+      require('child_process').execSync(`${adb} shell input keyevent ${keyCode}`, { stdio: 'ignore' });
+    }
+    const stepYaml = `- pressKey: ${key.charAt(0).toUpperCase() + key.slice(1).toLowerCase()}`;
     const outFile = getOutputFile();
     let currentCode = fs.existsSync(outFile) ? fs.readFileSync(outFile, 'utf-8') : '';
     currentCode = currentCode.trimEnd() + '\n' + stepYaml + '\n';
@@ -922,7 +975,8 @@ app.post('/api/test-cases/:id/run', async (req, res) => {
         });
       }
 
-      if (tc.platform === 'android' || tc.platform !== 'ios') {
+      const isAndroid = tc.platform === 'android' || (tc.platform !== 'ios' && !tc.platform.includes('ios'));
+      if (isAndroid) {
         try {
           const { execSync } = require('child_process');
           console.log(`📱 Warming up Maestro Android instrumentation service on port 7001...`);
@@ -932,9 +986,25 @@ app.post('/api/test-cases/:id/run', async (req, res) => {
         } catch (err) {
           console.error('Error warming up Android instrumentation:', err.message);
         }
+      } else {
+        // iOS: ensure no Android device interference; Maestro auto-detects booted simulator
+        console.log(`📱 Running Maestro test on iOS Simulator (auto-detected)...`);
       }
 
-      const extraArgs = (tc.platform === 'android' || tc.platform !== 'ios') ? ['--driver-host-port', '7001'] : [];
+      let extraArgs = [];
+      if (isAndroid) {
+        extraArgs = ['--driver-host-port', '7001'];
+      } else {
+        // iOS: explicitly target the booted simulator UDID to avoid Android emulator detection
+        try {
+          const udid = getBootedSimulatorUDID();
+          if (udid && udid !== 'booted') {
+            extraArgs = ['--device-id', udid];
+            console.log(`📱 Targeting iOS Simulator UDID: ${udid}`);
+          }
+        } catch (_) {}
+      }
+
       const args = ['test', ...extraArgs, yamlFile, '--format', 'html', '--output', path.join(reportDir, 'index.html')];
       runnerProcess = spawn(maestroBin, args, {
         cwd: __dirname,
