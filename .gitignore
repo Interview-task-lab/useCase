@@ -6,3 +6,4 @@ test-results/
 .env
 playwright_run_*.config.js
 run_test_*.spec.js
+run_test_*.yaml

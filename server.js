@@ -80,7 +80,15 @@ let lastRecordingLanguage = '';
 let killTimeout = null;
 
 const MAX_EXECUTION_MS = 10 * 60 * 1000; // 10 minutes
-const OUTPUT_FILE = path.join(TEMP_DIR, 'raw_script.js');
+let lastRecordingPlatform = 'web';
+
+function getOutputFile() {
+  if (lastRecordingLanguage === 'yaml' || lastRecordingPlatform === 'android' || lastRecordingPlatform === 'ios') {
+    return path.join(TEMP_DIR, 'raw_script.yaml');
+  }
+  return path.join(TEMP_DIR, 'raw_script.js');
+}
+
 
 function cleanupProcess() {
   if (killTimeout) {
@@ -299,10 +307,12 @@ app.post('/api/record/start', (req, res) => {
   const targetLang = language || (targetPlatform === 'web' ? 'javascript' : 'yaml');
   lastRecordingUrl = targetPlatform === 'web' ? targetUrl : targetApp;
   lastRecordingLanguage = targetLang;
+  lastRecordingPlatform = targetPlatform;
 
   // Clean up previous output file
-  if (fs.existsSync(OUTPUT_FILE)) {
-    fs.unlinkSync(OUTPUT_FILE);
+  const outFile = getOutputFile();
+  if (fs.existsSync(outFile)) {
+    fs.unlinkSync(outFile);
   }
 
   // Ensure temp dir exists
@@ -322,7 +332,7 @@ app.post('/api/record/start', (req, res) => {
 # 📱 Live Interactive Mobile Studio (${targetPlatform.toUpperCase()})
 - launchApp
 `;
-    fs.writeFileSync(OUTPUT_FILE, initialYaml, 'utf-8');
+    fs.writeFileSync(getOutputFile(), initialYaml, 'utf-8');
 
     processExited = true;
     processExitCode = 0;
@@ -333,7 +343,7 @@ app.post('/api/record/start', (req, res) => {
       message: `Live Mobile Studio started for ${targetPlatform.toUpperCase()}! Click directly on the phone screen below to record actions.`,
     });
   } else {
-    const args = ['playwright', 'codegen', url, `--target=${targetLang}`, `--output=${OUTPUT_FILE}`];
+    const args = ['playwright', 'codegen', url, `--target=${targetLang}`, `--output=${getOutputFile()}`];
     console.log(`🎬 Starting recording: npx ${args.join(' ')}`);
 
     activeProcess = spawn('npx', args, {
@@ -403,9 +413,10 @@ app.get('/api/record/status', (req, res) => {
     }
 
     // Try to read the output file
-    if (fs.existsSync(OUTPUT_FILE)) {
+    const outFile = getOutputFile();
+    if (fs.existsSync(outFile)) {
       try {
-        let code = fs.readFileSync(OUTPUT_FILE, 'utf-8');
+        let code = fs.readFileSync(outFile, 'utf-8');
         // Automatically uncomment assertions generated as comments
         code = code.replace(/^\s*\/\/\s*(await\s+expect\(.*)/gm, '  $1');
         const steps = parseCodeToSteps(code, lastRecordingLanguage);
@@ -418,6 +429,7 @@ app.get('/api/record/status', (req, res) => {
             steps,
             url: lastRecordingUrl,
             language: lastRecordingLanguage,
+            platform: lastRecordingPlatform,
           },
         });
       } catch (err) {
@@ -435,6 +447,7 @@ app.get('/api/record/status', (req, res) => {
           steps: [],
           url: lastRecordingUrl,
           language: lastRecordingLanguage,
+          platform: lastRecordingPlatform,
         },
       });
     }
@@ -455,7 +468,7 @@ app.post('/api/record/update-code', (req, res) => {
   }
   const lang = language || lastRecordingLanguage || 'yaml';
   try {
-    fs.writeFileSync(OUTPUT_FILE, code, 'utf-8');
+    fs.writeFileSync(getOutputFile(), code, 'utf-8');
   } catch (_) {}
   const steps = parseCodeToSteps(code, lang);
   return res.json({
@@ -464,6 +477,8 @@ app.post('/api/record/update-code', (req, res) => {
       code,
       steps,
       url: lastRecordingUrl,
+      language: lang,
+      platform: lastRecordingPlatform,
     },
   });
 });
@@ -513,7 +528,8 @@ app.post('/api/mobile/tap', (req, res) => {
 
     let bestNode = null;
     try {
-      require('child_process').execSync(`${adb} shell uiautomator dump /sdcard/window_dump.xml`, { stdio: 'ignore', timeout: 3000 });
+      require('child_process').execSync(`${adb} shell am force-stop dev.mobile.maestro && ${adb} shell am force-stop dev.mobile.maestro.test`, { stdio: 'ignore' });
+      require('child_process').execSync(`${adb} shell uiautomator dump /sdcard/window_dump.xml`, { stdio: 'ignore', timeout: 5000 });
       const xml = require('child_process').execSync(`${adb} exec-out cat /sdcard/window_dump.xml`, { encoding: 'utf-8', maxBuffer: 5 * 1024 * 1024 });
       
       const regex = /<node\s+([^>]+)>/g;
@@ -554,7 +570,11 @@ app.post('/api/mobile/tap', (req, res) => {
 
     let stepYaml = `- tapOn:\n    point: "${tapX},${tapY}"`;
     if (bestNode) {
-      if (bestNode.contentDesc && bestNode.contentDesc.trim() !== '') {
+      if (bestNode.resourceId && bestNode.resourceId.trim() !== '' && !bestNode.resourceId.includes('android:id')) {
+        let resId = bestNode.resourceId.trim();
+        if (resId.includes(':id/')) resId = resId.split(':id/')[1];
+        stepYaml = `- tapOn:\n    id: "${resId}"`;
+      } else if (bestNode.contentDesc && bestNode.contentDesc.trim() !== '') {
         const desc = bestNode.contentDesc.trim();
         if (!desc.includes(' ') && desc.length < 30) {
           stepYaml = `- tapOn:\n    id: "${desc}"`;
@@ -570,9 +590,10 @@ app.post('/api/mobile/tap', (req, res) => {
       }
     }
 
-    let currentCode = fs.existsSync(OUTPUT_FILE) ? fs.readFileSync(OUTPUT_FILE, 'utf-8') : '';
+    const outFile = getOutputFile();
+    let currentCode = fs.existsSync(outFile) ? fs.readFileSync(outFile, 'utf-8') : '';
     currentCode = currentCode.trimEnd() + '\n' + stepYaml + '\n';
-    fs.writeFileSync(OUTPUT_FILE, currentCode, 'utf-8');
+    fs.writeFileSync(outFile, currentCode, 'utf-8');
 
     const steps = parseCodeToSteps(currentCode, 'yaml');
 
@@ -592,9 +613,10 @@ app.post('/api/mobile/input-text', (req, res) => {
   try {
     require('child_process').execSync(`${adb} shell input text "${(text || '').replace(/"/g, '\\"')}"`, { stdio: 'ignore' });
     const stepYaml = `- inputText: "${text || ''}"`;
-    let currentCode = fs.existsSync(OUTPUT_FILE) ? fs.readFileSync(OUTPUT_FILE, 'utf-8') : '';
+    const outFile = getOutputFile();
+    let currentCode = fs.existsSync(outFile) ? fs.readFileSync(outFile, 'utf-8') : '';
     currentCode = currentCode.trimEnd() + '\n' + stepYaml + '\n';
-    fs.writeFileSync(OUTPUT_FILE, currentCode, 'utf-8');
+    fs.writeFileSync(outFile, currentCode, 'utf-8');
     const steps = parseCodeToSteps(currentCode, 'yaml');
     return res.json({ success: true, data: { code: currentCode, steps, language: 'yaml' } });
   } catch (err) {
@@ -611,9 +633,10 @@ app.post('/api/mobile/key', (req, res) => {
     if (key === 'HOME') { keycode = 3; keyName = 'Home'; }
     require('child_process').execSync(`${adb} shell input keyevent ${keycode}`, { stdio: 'ignore' });
     const stepYaml = `- pressKey: ${keyName}`;
-    let currentCode = fs.existsSync(OUTPUT_FILE) ? fs.readFileSync(OUTPUT_FILE, 'utf-8') : '';
+    const outFile = getOutputFile();
+    let currentCode = fs.existsSync(outFile) ? fs.readFileSync(outFile, 'utf-8') : '';
     currentCode = currentCode.trimEnd() + '\n' + stepYaml + '\n';
-    fs.writeFileSync(OUTPUT_FILE, currentCode, 'utf-8');
+    fs.writeFileSync(outFile, currentCode, 'utf-8');
     const steps = parseCodeToSteps(currentCode, 'yaml');
     return res.json({ success: true, data: { code: currentCode, steps, language: 'yaml' } });
   } catch (err) {
@@ -718,7 +741,8 @@ app.post('/api/test-cases/:id/run', async (req, res) => {
     runnerOutput = '';
     runnerReportPath = `/reports/test-${testId}/index.html`;
 
-    if (tc.platform === 'android' || tc.platform === 'ios') {
+    const isMobile = tc.platform === 'android' || tc.platform === 'ios' || tc.language === 'yaml' || (typeof tc.code === 'string' && tc.code.trim().startsWith('appId:'));
+    if (isMobile) {
       const yamlFile = path.join(__dirname, `run_test_${testId}.yaml`);
       fs.writeFileSync(yamlFile, tc.code, 'utf-8');
 
@@ -780,7 +804,20 @@ app.post('/api/test-cases/:id/run', async (req, res) => {
         });
       }
 
-      const args = ['test', yamlFile, '--format', 'html', '--output', path.join(reportDir, 'index.html')];
+      if (tc.platform === 'android' || tc.platform !== 'ios') {
+        try {
+          const { execSync } = require('child_process');
+          console.log(`📱 Warming up Maestro Android instrumentation service on port 7001...`);
+          execSync('adb shell am force-stop dev.mobile.maestro && adb shell am force-stop dev.mobile.maestro.test && adb shell am instrument -w -e port 7001 dev.mobile.maestro.test/androidx.test.runner.AndroidJUnitRunner > /dev/null 2>&1 &', { stdio: 'ignore' });
+          const start = Date.now();
+          while (Date.now() - start < 3000) {}
+        } catch (err) {
+          console.error('Error warming up Android instrumentation:', err.message);
+        }
+      }
+
+      const extraArgs = (tc.platform === 'android' || tc.platform !== 'ios') ? ['--driver-host-port', '7001'] : [];
+      const args = ['test', ...extraArgs, yamlFile, '--format', 'html', '--output', path.join(reportDir, 'index.html')];
       runnerProcess = spawn(maestroBin, args, {
         cwd: __dirname,
         stdio: 'pipe',
