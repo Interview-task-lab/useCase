@@ -23,6 +23,7 @@ const closeModalBtn = document.getElementById('closeModalBtn');
 // ─── State ───────────────────────────────────────────────────────────────────
 let pollingInterval = null;
 let currentResult = null;
+let currentPlatform = 'web'; // 'web', 'android', 'ios'
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function showToast(message, type = 'info') {
@@ -72,19 +73,24 @@ function escapeHtml(text) {
 // ─── Recording ───────────────────────────────────────────────────────────────
 async function startRecording() {
   const url = (urlInput && urlInput.value) ? urlInput.value.trim() : '';
-  const language = languageSelect.value;
+  const language = currentPlatform === 'web' ? languageSelect.value : 'yaml';
+  const appPath = document.getElementById('mobileAppInput') ? document.getElementById('mobileAppInput').value.trim() : '';
+  const deviceName = document.getElementById('mobileDeviceInput') ? document.getElementById('mobileDeviceInput').value.trim() : '';
 
   try {
-    startBtn.disabled = true;
-    startBtn.innerHTML = `
-      <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>
-      Starting…
-    `;
+    const btn = currentPlatform === 'web' ? startBtn : document.getElementById('startMobileBtn');
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = `
+        <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>
+        Starting ${currentPlatform.toUpperCase()}…
+      `;
+    }
 
     const res = await fetch('/api/record/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, language }),
+      body: JSON.stringify({ url, language, platform: currentPlatform, appPath, deviceName }),
     });
 
     const data = await res.json();
@@ -95,15 +101,17 @@ async function startRecording() {
       return;
     }
 
-    showToast('Recording started! A browser window should open.', 'success');
+    showToast(`Recording started for ${currentPlatform.toUpperCase()}!`, 'success');
     setStatusBadge('recording');
     recordingBanner.classList.remove('hidden');
     resultsSection.classList.add('hidden');
-    startBtn.disabled = true;
-    startBtn.innerHTML = `
-      <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>
-      Recording…
-    `;
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = `
+        <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>
+        Recording…
+      `;
+    }
 
     startPolling();
   } catch (err) {
@@ -113,11 +121,21 @@ async function startRecording() {
 }
 
 function resetStartButton() {
-  startBtn.disabled = false;
-  startBtn.innerHTML = `
-    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke-width="2"/><circle cx="12" cy="12" r="4" fill="currentColor" stroke="none"/></svg>
-    Start Recording
-  `;
+  if (startBtn) {
+    startBtn.disabled = false;
+    startBtn.innerHTML = `
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke-width="2"/><circle cx="12" cy="12" r="4" fill="currentColor" stroke="none"/></svg>
+      Start Web Studio
+    `;
+  }
+  const startMobileBtn = document.getElementById('startMobileBtn');
+  if (startMobileBtn) {
+    startMobileBtn.disabled = false;
+    startMobileBtn.innerHTML = `
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>
+      Start Maestro Studio
+    `;
+  }
 }
 
 function startPolling() {
@@ -155,6 +173,11 @@ function onRecordingComplete(data) {
   resetStartButton();
 
   currentResult = data.data;
+  if (currentResult) {
+    currentResult.platform = currentPlatform;
+    currentResult.appPath = document.getElementById('mobileAppInput') ? document.getElementById('mobileAppInput').value.trim() : '';
+    currentResult.deviceName = document.getElementById('mobileDeviceInput') ? document.getElementById('mobileDeviceInput').value.trim() : '';
+  }
 
   // Render steps
   renderSteps(currentResult.steps);
@@ -253,6 +276,9 @@ async function saveTest() {
         language: currentResult.language,
         code: currentResult.code,
         steps: currentResult.steps,
+        platform: currentResult.platform || currentPlatform,
+        app_path: currentResult.appPath || '',
+        device_name: currentResult.deviceName || '',
       }),
     });
 
@@ -301,7 +327,10 @@ async function loadSavedTests() {
             <div class="min-w-0">
               <div class="font-semibold text-sm text-surface-100 truncate">${escapeHtml(tc.name)}</div>
               <div class="flex items-center gap-3 mt-1">
-                <span class="text-xs text-surface-500 truncate max-w-[200px]">${escapeHtml(tc.url || '—')}</span>
+                <span class="text-xs text-surface-500 truncate max-w-[200px]">${escapeHtml(tc.url || tc.app_path || '—')}</span>
+                <span class="lang-badge ${tc.platform === 'android' ? '!bg-emerald-500/10 !text-emerald-400 !border-emerald-500/20' : tc.platform === 'ios' ? '!bg-purple-500/10 !text-purple-400 !border-purple-500/20' : ''}">
+                  ${tc.platform === 'android' ? '🤖 Android' : tc.platform === 'ios' ? '🍎 iOS' : '🌐 Web'}
+                </span>
                 <span class="lang-badge">${escapeHtml(tc.language)}</span>
                 <span class="text-xs text-surface-500">${stepsCount} steps</span>
               </div>
@@ -577,17 +606,59 @@ function resetRunBtn(id) {
   }
 }
 
-// ─── Event Listeners ─────────────────────────────────────────────────────────
-startBtn.addEventListener('click', startRecording);
-copyCodeBtn.addEventListener('click', copyCode);
-newRecordingBtn.addEventListener('click', newRecording);
-saveTestBtn.addEventListener('click', saveTest);
-refreshTestsBtn.addEventListener('click', loadSavedTests);
-closeModalBtn.addEventListener('click', closeModal);
+function setPlatform(platform) {
+  currentPlatform = platform;
+  document.querySelectorAll('.platform-tab').forEach(btn => {
+    btn.classList.remove('bg-accent-500', 'text-white', 'shadow-lg', 'shadow-accent-500/20');
+    btn.classList.add('text-surface-400');
+  });
+  const activeBtn = document.getElementById(`tab${platform.charAt(0).toUpperCase() + platform.slice(1)}`);
+  if (activeBtn) {
+    activeBtn.classList.remove('text-surface-400');
+    activeBtn.classList.add('bg-accent-500', 'text-white', 'shadow-lg', 'shadow-accent-500/20');
+  }
 
-detailModal.addEventListener('click', (e) => {
-  if (e.target === detailModal) closeModal();
-});
+  const webControls = document.getElementById('webControls');
+  const mobileControls = document.getElementById('mobileControls');
+  if (platform === 'web') {
+    if (webControls) webControls.classList.remove('hidden');
+    if (mobileControls) mobileControls.classList.add('hidden');
+  } else {
+    if (webControls) webControls.classList.add('hidden');
+    if (mobileControls) mobileControls.classList.remove('hidden');
+    const startMobileBtn = document.getElementById('startMobileBtn');
+    if (startMobileBtn) {
+      startMobileBtn.innerHTML = `
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>
+        Start ${platform === 'android' ? 'Android' : 'iOS'} Maestro Studio
+      `;
+    }
+  }
+}
+
+// ─── Event Listeners ─────────────────────────────────────────────────────────
+if (startBtn) startBtn.addEventListener('click', startRecording);
+const startMobileBtn = document.getElementById('startMobileBtn');
+if (startMobileBtn) startMobileBtn.addEventListener('click', startRecording);
+
+const tabWeb = document.getElementById('tabWeb');
+const tabAndroid = document.getElementById('tabAndroid');
+const tabIos = document.getElementById('tabIos');
+if (tabWeb) tabWeb.addEventListener('click', () => setPlatform('web'));
+if (tabAndroid) tabAndroid.addEventListener('click', () => setPlatform('android'));
+if (tabIos) tabIos.addEventListener('click', () => setPlatform('ios'));
+
+if (copyCodeBtn) copyCodeBtn.addEventListener('click', copyCode);
+if (newRecordingBtn) newRecordingBtn.addEventListener('click', newRecording);
+if (saveTestBtn) saveTestBtn.addEventListener('click', saveTest);
+if (refreshTestsBtn) refreshTestsBtn.addEventListener('click', loadSavedTests);
+if (closeModalBtn) closeModalBtn.addEventListener('click', closeModal);
+
+if (detailModal) {
+  detailModal.addEventListener('click', (e) => {
+    if (e.target === detailModal) closeModal();
+  });
+}
 
 // Enter key on URL input
 if (urlInput) {
@@ -604,6 +675,12 @@ async function loadConfig() {
       if (urlInput) urlInput.value = data.config.targetUrl;
       const display = document.getElementById('configUrlDisplay');
       if (display) display.textContent = data.config.targetUrl;
+    }
+    if (data.success && data.config.mobile) {
+      const mobApp = document.getElementById('mobileAppInput');
+      const mobDev = document.getElementById('mobileDeviceInput');
+      if (mobApp && data.config.mobile.appIdOrPath) mobApp.value = data.config.mobile.appIdOrPath;
+      if (mobDev && data.config.mobile.deviceName) mobDev.value = data.config.mobile.deviceName;
     }
   } catch (e) {
     console.warn('Failed to load config:', e);

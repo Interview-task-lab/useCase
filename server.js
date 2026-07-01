@@ -119,9 +119,38 @@ function parseCodeToSteps(code, language) {
 
     let description = null;
 
+    // Maestro YAML rules
+    if (line === '- launchApp' || line === 'launchApp') {
+      description = 'Launch mobile application';
+    }
+    const tapOnMatch = line.match(/tapOn:\s*["']?(.*?)["']?$/);
+    if (!description && tapOnMatch) {
+      description = `Tap on element "${tapOnMatch[1]}"`;
+    }
+    const inputTextMatch = line.match(/inputText:\s*["']?(.*?)["']?$/);
+    if (!description && inputTextMatch) {
+      description = `Input text "${inputTextMatch[1]}"`;
+    }
+    const assertVisibleMatch = line.match(/assertVisible:\s*["']?(.*?)["']?$/);
+    if (!description && assertVisibleMatch) {
+      description = `Assert element "${assertVisibleMatch[1]}" is visible`;
+    }
+    const scrollUntilVisibleMatch = line.match(/scrollUntilVisible:\s*["']?(.*?)["']?$/);
+    if (!description && scrollUntilVisibleMatch) {
+      description = `Scroll until "${scrollUntilVisibleMatch[1]}" is visible`;
+    }
+    const pressKeyMatch = line.match(/pressKey:\s*["']?(.*?)["']?$/);
+    if (!description && pressKeyMatch) {
+      description = `Press key "${pressKeyMatch[1]}"`;
+    }
+    const swipeMatch = line.match(/swipe:\s*$/);
+    if (!description && swipeMatch) {
+      description = 'Swipe on screen';
+    }
+
     // page.goto
     const gotoMatch = line.match(/\.goto\(['"](.*?)['"]/);
-    if (gotoMatch) {
+    if (!description && gotoMatch) {
       description = `Navigate to "${gotoMatch[1]}"`;
     }
 
@@ -250,12 +279,14 @@ app.post('/api/record/start', (req, res) => {
     });
   }
 
-  const { url, language } = req.body;
+  const { url, language, platform, appPath, deviceName } = req.body;
   const cfg = getConfig();
+  const targetPlatform = platform || 'web';
   const targetUrl = url || cfg.targetUrl || 'https://www.enuygun.com/';
+  const targetApp = appPath || (cfg.mobile && cfg.mobile.appIdOrPath) || 'com.enuygun.android';
 
-  const targetLang = language || 'javascript';
-  lastRecordingUrl = targetUrl;
+  const targetLang = language || (targetPlatform === 'web' ? 'javascript' : 'yaml');
+  lastRecordingUrl = targetPlatform === 'web' ? targetUrl : targetApp;
   lastRecordingLanguage = targetLang;
 
   // Clean up previous output file
@@ -272,15 +303,34 @@ app.post('/api/record/start', (req, res) => {
   processExitCode = null;
   processError = null;
 
-  const args = ['playwright', 'codegen', url, `--target=${targetLang}`, `--output=${OUTPUT_FILE}`];
+  if (targetPlatform === 'android' || targetPlatform === 'ios') {
+    try {
+      require('child_process').execSync('which maestro || maestro --version', { stdio: 'ignore' });
+    } catch (e) {
+      return res.status(400).json({
+        success: false,
+        message: 'Maestro CLI bulunamadı. Lütfen terminalden "curl -Ls https://get.maestro.mobile.dev | bash" komutu ile yükleyip, bir Android Emülatör veya iOS Simülatör başlatın.',
+      });
+    }
 
-  console.log(`🎬 Starting recording: npx ${args.join(' ')}`);
+    const args = ['studio', '--port=9999'];
+    console.log(`📱 Starting Maestro Studio (${targetPlatform}): maestro ${args.join(' ')}`);
 
-  activeProcess = spawn('npx', args, {
-    cwd: __dirname,
-    stdio: 'pipe',
-    shell: true,
-  });
+    activeProcess = spawn('maestro', args, {
+      cwd: __dirname,
+      stdio: 'pipe',
+      shell: true,
+    });
+  } else {
+    const args = ['playwright', 'codegen', url, `--target=${targetLang}`, `--output=${OUTPUT_FILE}`];
+    console.log(`🎬 Starting recording: npx ${args.join(' ')}`);
+
+    activeProcess = spawn('npx', args, {
+      cwd: __dirname,
+      stdio: 'pipe',
+      shell: true,
+    });
+  }
 
   activeProcess.stdout.on('data', (data) => {
     console.log(`[codegen stdout] ${data.toString().trim()}`);
@@ -388,7 +438,7 @@ app.get('/api/record/status', (req, res) => {
 
 // ─── API: Save Test Case ─────────────────────────────────────────────────────
 app.post('/api/test-cases', async (req, res) => {
-  let { name, url, language, code, steps } = req.body;
+  let { name, url, language, code, steps, platform, app_path, device_name } = req.body;
 
   if (!name || !code) {
     return res.status(400).json({ success: false, message: 'Name and code are required.' });
@@ -405,10 +455,10 @@ app.post('/api/test-cases', async (req, res) => {
 
   try {
     const result = await pool.query(
-      `INSERT INTO test_cases (name, url, language, code, steps)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO test_cases (name, url, language, code, steps, platform, app_path, device_name)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING *`,
-      [name, url || '', language || 'javascript', code, JSON.stringify(steps || [])]
+      [name, url || '', language || 'javascript', code, JSON.stringify(steps || []), platform || 'web', app_path || '', device_name || '']
     );
     return res.json({ success: true, testCase: result.rows[0] });
   } catch (err) {
@@ -477,14 +527,42 @@ app.post('/api/test-cases/:id/run', async (req, res) => {
     // Convert standalone script to Playwright Test format
     const testCode = convertToPlaywrightTest(tc.code, tc.name);
 
-    // Write test file to project root so @playwright/test resolves from node_modules
-    const testFile = path.join(__dirname, `run_test_${testId}.spec.js`);
-    fs.writeFileSync(testFile, testCode, 'utf-8');
+    // Reset runner state
+    runnerState = 'running';
+    runnerTestId = testId;
+    runnerOutput = '';
+    runnerReportPath = `/reports/test-${testId}/index.html`;
 
-    // Write a minimal playwright config to project root
-    const cfg = getConfig();
-    const configFile = path.join(__dirname, `playwright_run_${testId}.config.js`);
-    const configContent = `
+    if (tc.platform === 'android' || tc.platform === 'ios') {
+      const yamlFile = path.join(__dirname, `run_test_${testId}.yaml`);
+      fs.writeFileSync(yamlFile, tc.code, 'utf-8');
+
+      console.log(`▶️  Running mobile test #${testId} (${tc.platform}): "${tc.name}"`);
+
+      try {
+        require('child_process').execSync('which maestro || maestro --version', { stdio: 'ignore' });
+      } catch (e) {
+        runnerState = 'error';
+        runnerOutput = '❌ Maestro CLI bulunamadı. Lütfen terminalden "curl -Ls https://get.maestro.mobile.dev | bash" komutu ile yükleyin.';
+        try { fs.unlinkSync(yamlFile); } catch (_) {}
+        return res.status(400).json({ success: false, message: runnerOutput });
+      }
+
+      const args = ['test', yamlFile, '--format', 'html', '--output', path.join(reportDir, 'index.html')];
+      runnerProcess = spawn('maestro', args, {
+        cwd: __dirname,
+        stdio: 'pipe',
+        shell: true,
+      });
+    } else {
+      // Write test file to project root so @playwright/test resolves from node_modules
+      const testFile = path.join(__dirname, `run_test_${testId}.spec.js`);
+      fs.writeFileSync(testFile, testCode, 'utf-8');
+
+      // Write a minimal playwright config to project root
+      const cfg = getConfig();
+      const configFile = path.join(__dirname, `playwright_run_${testId}.config.js`);
+      const configContent = `
 const { defineConfig } = require('@playwright/test');
 module.exports = defineConfig({
   reporter: [['html', { outputFolder: '${reportDir.replace(/\\/g, '/')}', open: 'never' }]],
@@ -494,22 +572,17 @@ module.exports = defineConfig({
   },
 });
 `;
-    fs.writeFileSync(configFile, configContent, 'utf-8');
+      fs.writeFileSync(configFile, configContent, 'utf-8');
 
-    // Reset runner state
-    runnerState = 'running';
-    runnerTestId = testId;
-    runnerOutput = '';
-    runnerReportPath = `/reports/test-${testId}/index.html`;
+      console.log(`▶️  Running web test #${testId}: "${tc.name}"`);
 
-    console.log(`▶️  Running test #${testId}: "${tc.name}"`);
-
-    const args = ['playwright', 'test', testFile, `--config=${configFile}`];
-    runnerProcess = spawn('npx', args, {
-      cwd: __dirname,
-      stdio: 'pipe',
-      shell: true,
-    });
+      const args = ['playwright', 'test', testFile, `--config=${configFile}`];
+      runnerProcess = spawn('npx', args, {
+        cwd: __dirname,
+        stdio: 'pipe',
+        shell: true,
+      });
+    }
 
     runnerProcess.stdout.on('data', (data) => {
       const text = data.toString();

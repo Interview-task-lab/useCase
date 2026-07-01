@@ -78,11 +78,27 @@
 
     <!-- ─── Recording Controls ──────────────────────────────────── -->
     <section id="controlsSection" class="glass-card p-6 mb-8">
-      <div class="flex items-center gap-2 mb-5">
-        <div class="w-2 h-2 rounded-full bg-accent-500"></div>
-        <h2 class="text-sm font-semibold uppercase tracking-wider text-surface-300">New Recording</h2>
+      <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6 pb-4 border-b border-surface-700/60">
+        <div class="flex items-center gap-2">
+          <div class="w-2 h-2 rounded-full bg-accent-500 animate-pulse"></div>
+          <h2 class="text-sm font-semibold uppercase tracking-wider text-surface-300">New Recording Studio</h2>
+        </div>
+        <!-- Platform Switcher -->
+        <div class="flex items-center gap-1 bg-surface-900/90 p-1 rounded-xl border border-surface-700/80">
+          <button type="button" id="tabWeb" class="platform-tab px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all bg-accent-500 text-white shadow-lg shadow-accent-500/20">
+            <span>🌐</span> Web (Playwright)
+          </button>
+          <button type="button" id="tabAndroid" class="platform-tab px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-2 text-surface-400 hover:text-surface-200 transition-all">
+            <span>🤖</span> Android (Maestro)
+          </button>
+          <button type="button" id="tabIos" class="platform-tab px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-2 text-surface-400 hover:text-surface-200 transition-all">
+            <span>🍎</span> iOS (Maestro)
+          </button>
+        </div>
       </div>
-      <div class="grid grid-cols-1 md:grid-cols-12 gap-4">
+
+      <!-- Web Controls -->
+      <div id="webControls" class="grid grid-cols-1 md:grid-cols-12 gap-4">
         <div class="md:col-span-6">
           <label class="block text-xs font-medium text-surface-400 mb-1.5">Target URL (Loaded from Config)</label>
           <div class="input-field w-full flex items-center justify-between bg-surface-900/80 border-surface-700/80 cursor-default select-none">
@@ -104,7 +120,25 @@
         <div class="md:col-span-3 flex items-end">
           <button id="startBtn" class="btn-primary w-full">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke-width="2"/><circle cx="12" cy="12" r="4" fill="currentColor" stroke="none"/></svg>
-            Start Recording
+            Start Web Studio
+          </button>
+        </div>
+      </div>
+
+      <!-- Mobile Controls (Hidden by default) -->
+      <div id="mobileControls" class="grid grid-cols-1 md:grid-cols-12 gap-4 hidden">
+        <div class="md:col-span-5">
+          <label class="block text-xs font-medium text-surface-400 mb-1.5">App ID / Package / APK Path</label>
+          <input type="text" id="mobileAppInput" placeholder="com.enuygun.android / path/to/app.apk" class="input-field w-full font-mono text-xs" value="com.enuygun.android" />
+        </div>
+        <div class="md:col-span-4">
+          <label class="block text-xs font-medium text-surface-400 mb-1.5">Target Device / Emulator</label>
+          <input type="text" id="mobileDeviceInput" placeholder="Pixel_6_API_33 / iPhone 15" class="input-field w-full font-mono text-xs" value="Pixel_6_API_33" />
+        </div>
+        <div class="md:col-span-3 flex items-end">
+          <button id="startMobileBtn" class="btn-primary w-full bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 border-emerald-500/30 shadow-emerald-500/20">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>
+            Start Maestro Studio
           </button>
         </div>
       </div>

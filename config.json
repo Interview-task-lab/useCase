@@ -1,3 +1,8 @@
 {
-  "targetUrl": "https://www.enuygun.com/"
+  "targetUrl": "https://www.enuygun.com/",
+  "mobile": {
+    "defaultPlatform": "android",
+    "appIdOrPath": "com.enuygun.android",
+    "deviceName": "Pixel_6_API_33"
+  }
 }
