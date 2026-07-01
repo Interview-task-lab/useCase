@@ -1,0 +1,16 @@
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: codegen_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: codegen_user
+      POSTGRES_PASSWORD: codegen_password
+      POSTGRES_DB: codegen_db
+    ports:
+      - "5434:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:

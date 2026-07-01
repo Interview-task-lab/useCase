@@ -1,0 +1,8 @@
+node_modules/
+temp/
+test-results/
+*.log
+.DS_Store
+.env
+playwright_run_*.config.js
+run_test_*.spec.js
