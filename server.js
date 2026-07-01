@@ -539,26 +539,53 @@ app.post('/api/mobile/tap', (req, res) => {
   const platform = lastRecordingPlatform;
   const adb = getAdbBinary();
   try {
-    // iOS simulator tap
+    // iOS simulator tap via osascript (xcrun simctl has no tap command)
     if (platform === 'ios') {
-      let simW = 390, simH = 844;
       try {
-        const tmpFile = path.join(TEMP_DIR, `sim_screen_tap_${Date.now()}.png`);
-        require('child_process').execSync(`xcrun simctl io booted screenshot "${tmpFile}"`, { stdio: 'ignore' });
-        // Use default iPhone 15 resolution
-        try { fs.unlinkSync(tmpFile); } catch (_) {}
-      } catch (_) {}
-      const tapX = Math.round(normX * simW);
-      const tapY = Math.round(normY * simH);
-      require('child_process').execSync(`xcrun simctl io booted tap ${tapX} ${tapY}`, { stdio: 'ignore' });
-      const stepYaml = `- tapOn:\n    point: "${tapX},${tapY}"`;
-      const outFile = getOutputFile();
-      let currentCode = fs.existsSync(outFile) ? fs.readFileSync(outFile, 'utf-8') : '';
-      currentCode = currentCode.trimEnd() + '\n' + stepYaml + '\n';
-      fs.writeFileSync(outFile, currentCode, 'utf-8');
-      const steps = parseCodeToSteps(currentCode, 'yaml');
-      return res.json({ success: true, data: { code: currentCode, steps, language: 'yaml' } });
+        // Get the Simulator window position and size via osascript
+        const winInfoScript = `
+tell application "Simulator" to activate
+delay 0.2
+tell application "System Events"
+  tell process "Simulator"
+    set simWindow to front window
+    set {wx, wy} to position of simWindow
+    set {ww, wh} to size of simWindow
+    return wx & "," & wy & "," & ww & "," & wh
+  end tell
+end tell`;
+        const winInfo = require('child_process').execSync(`osascript -e '${winInfoScript.replace(/'/g, "'\"'\"'")}'`, { encoding: 'utf-8' }).trim();
+        const parts = winInfo.split(',').map(s => parseInt(s.trim(), 10));
+        const [wx, wy, ww, wh] = parts;
+
+        // Map normalized click position to screen pixel coordinate
+        const screenX = Math.round(wx + normX * ww);
+        const screenY = Math.round(wy + normY * wh);
+
+        const clickScript = `
+tell application "Simulator" to activate
+delay 0.1
+tell application "System Events"
+  click at {${screenX}, ${screenY}}
+end tell`;
+        require('child_process').execSync(`osascript -e '${clickScript.replace(/'/g, "'\"'\"'")}'`, { stdio: 'ignore' });
+
+        // Record as point (no UI hierarchy on iOS without idb)
+        const simW = 390, simH = 844; // iPhone 15 logical resolution
+        const tapX = Math.round(normX * simW);
+        const tapY = Math.round(normY * simH);
+        const stepYaml = `- tapOn:\n    point: "${tapX},${tapY}"`;
+        const outFile = getOutputFile();
+        let currentCode = fs.existsSync(outFile) ? fs.readFileSync(outFile, 'utf-8') : '';
+        currentCode = currentCode.trimEnd() + '\n' + stepYaml + '\n';
+        fs.writeFileSync(outFile, currentCode, 'utf-8');
+        const steps = parseCodeToSteps(currentCode, 'yaml');
+        return res.json({ success: true, data: { code: currentCode, steps, language: 'yaml' } });
+      } catch (iosErr) {
+        return res.status(500).json({ success: false, message: 'iOS tap failed: ' + iosErr.message });
+      }
     }
+
 
     let devW = 1080, devH = 2400;
     try {
