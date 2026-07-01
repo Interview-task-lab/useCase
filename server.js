@@ -539,39 +539,68 @@ app.post('/api/mobile/tap', (req, res) => {
   const platform = lastRecordingPlatform;
   const adb = getAdbBinary();
   try {
-    // iOS simulator tap via osascript (xcrun simctl has no tap command)
+    // iOS simulator tap via osascript temp file (xcrun simctl has no tap command)
     if (platform === 'ios') {
       try {
-        // Get the Simulator window position and size via osascript
-        const winInfoScript = `
-tell application "Simulator" to activate
-delay 0.2
+        const os = require('os');
+        const ts = Date.now();
+        const infoScriptFile = path.join(os.tmpdir(), `sim_info_${ts}.applescript`);
+        const infoScriptContent = `tell application "Simulator"
+  activate
+end tell
+delay 0.5
 tell application "System Events"
-  tell process "Simulator"
-    set simWindow to front window
-    set {wx, wy} to position of simWindow
-    set {ww, wh} to size of simWindow
-    return wx & "," & wy & "," & ww & "," & wh
-  end tell
-end tell`;
-        const winInfo = require('child_process').execSync(`osascript -e '${winInfoScript.replace(/'/g, "'\"'\"'")}'`, { encoding: 'utf-8' }).trim();
+  repeat 5 times
+    try
+      tell process "Simulator"
+        set simWindow to front window
+        set {wx, wy} to position of simWindow
+        set {ww, wh} to size of simWindow
+        return (wx as string) & "," & (wy as string) & "," & (ww as string) & "," & (wh as string)
+      end tell
+    on error
+      delay 0.3
+    end try
+  end repeat
+end tell
+return "ERROR"`;
+        fs.writeFileSync(infoScriptFile, infoScriptContent, 'utf-8');
+        const winInfo = require('child_process').execSync(`osascript "${infoScriptFile}"`, { encoding: 'utf-8' }).trim();
+        try { fs.unlinkSync(infoScriptFile); } catch (_) {}
+
+        if (winInfo.startsWith('ERROR')) {
+          return res.status(500).json({ success: false, message: 'iOS tap failed: Could not access Simulator window. Make sure Simulator is open and in the foreground.' });
+        }
+
         const parts = winInfo.split(',').map(s => parseInt(s.trim(), 10));
         const [wx, wy, ww, wh] = parts;
 
-        // Map normalized click position to screen pixel coordinate
+        // Map normalized position to actual screen pixel coordinate
         const screenX = Math.round(wx + normX * ww);
         const screenY = Math.round(wy + normY * wh);
 
-        const clickScript = `
-tell application "Simulator" to activate
-delay 0.1
+        const clickScriptFile = path.join(os.tmpdir(), `sim_click_${ts}.applescript`);
+        const clickScriptContent = `tell application "Simulator"
+  activate
+end tell
+delay 0.2
 tell application "System Events"
-  click at {${screenX}, ${screenY}}
-end tell`;
-        require('child_process').execSync(`osascript -e '${clickScript.replace(/'/g, "'\"'\"'")}'`, { stdio: 'ignore' });
+  repeat 3 times
+    try
+      click at {${screenX}, ${screenY}}
+      return "OK"
+    on error
+      delay 0.2
+    end try
+  end repeat
+end tell
+return "FAIL"`;
+        fs.writeFileSync(clickScriptFile, clickScriptContent, 'utf-8');
+        require('child_process').execSync(`osascript "${clickScriptFile}"`, { stdio: 'ignore' });
+        try { fs.unlinkSync(clickScriptFile); } catch (_) {}
 
-        // Record as point (no UI hierarchy on iOS without idb)
-        const simW = 390, simH = 844; // iPhone 15 logical resolution
+        // Record step using iPhone 15 logical resolution
+        const simW = 390, simH = 844;
         const tapX = Math.round(normX * simW);
         const tapY = Math.round(normY * simH);
         const stepYaml = `- tapOn:\n    point: "${tapX},${tapY}"`;
