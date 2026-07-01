@@ -117,6 +117,22 @@ async function startRecording() {
       resultsSection.classList.remove('hidden');
       resultsSection.classList.add('fade-in');
 
+      const bannerStop = document.getElementById('bannerStopBtn');
+      if (bannerStop) {
+        bannerStop.classList.remove('hidden');
+        bannerStop.classList.add('flex');
+      }
+      const indicator = document.getElementById('phoneStatusIndicator');
+      if (indicator) {
+        indicator.className = 'text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-mono flex items-center gap-1';
+        indicator.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span> Live';
+      }
+      const stopBtn = document.getElementById('stopMobileRecordBtn');
+      if (stopBtn) {
+        stopBtn.classList.remove('hidden');
+        stopBtn.classList.add('animate-pulse');
+      }
+
       const resultsGrid = document.getElementById('resultsGrid');
       const livePhonePanel = document.getElementById('livePhonePanel');
       if (resultsGrid) resultsGrid.className = 'grid grid-cols-1 lg:grid-cols-3 gap-5';
@@ -912,6 +928,41 @@ document.querySelectorAll('.phone-key-btn').forEach(btn => {
     if (key) handlePhoneKey(key);
   });
 });
+
+function stopMobileRecording() {
+  stopPhoneAutoRefresh();
+  const indicator = document.getElementById('phoneStatusIndicator');
+  if (indicator) {
+    indicator.className = 'text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 font-mono flex items-center gap-1';
+    indicator.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span> Stopped';
+  }
+  const stopBtn = document.getElementById('stopMobileRecordBtn');
+  if (stopBtn) stopBtn.classList.remove('animate-pulse');
+
+  const bannerStop = document.getElementById('bannerStopBtn');
+  if (bannerStop) bannerStop.classList.add('hidden');
+
+  const recordingBanner = document.getElementById('recordingBanner');
+  if (recordingBanner) recordingBanner.classList.add('hidden');
+
+  showToast('⏹️ Recording stopped! Please enter a test name below and click "Save Test".', 'success');
+
+  const nameInput = document.getElementById('testNameInput');
+  if (nameInput) {
+    nameInput.focus();
+    nameInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    nameInput.classList.add('ring-4', 'ring-accent-400', 'border-accent-400', 'transition-all', 'duration-500');
+    setTimeout(() => {
+      nameInput.classList.remove('ring-4', 'ring-accent-400', 'border-accent-400');
+    }, 3500);
+  }
+}
+
+const stopMobileBtn = document.getElementById('stopMobileRecordBtn');
+if (stopMobileBtn) stopMobileBtn.addEventListener('click', stopMobileRecording);
+
+const bannerStopBtn = document.getElementById('bannerStopBtn');
+if (bannerStopBtn) bannerStopBtn.addEventListener('click', stopMobileRecording);
 
 async function loadConfig() {
   try {

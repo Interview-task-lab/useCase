@@ -151,15 +151,20 @@
           <div class="recording-pulse-ring">
             <div class="w-4 h-4 rounded-full bg-red-500"></div>
           </div>
-          <div>
+          <div class="flex-1">
             <h3 class="text-lg font-bold text-white mb-1">Recording Session Active</h3>
             <p class="text-red-200/80 text-sm leading-relaxed">
               The Playwright browser window has opened locally on your desktop.<br/>
               Execute your test actions in that window. Once finished, <strong class="text-white">close the browser window</strong> to generate your test script.
             </p>
-            <div class="mt-3 flex items-center gap-2 text-xs text-red-300/70">
-              <svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>
-              Polling status every 1.5 seconds…
+            <div class="mt-3 flex items-center justify-between">
+              <div class="flex items-center gap-2 text-xs text-red-300/70">
+                <svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>
+                <span>Polling status every 1.5 seconds…</span>
+              </div>
+              <button id="bannerStopBtn" type="button" class="btn-primary text-xs px-4 py-1.5 bg-red-600 hover:bg-red-500 text-white font-bold hidden items-center gap-1.5 shadow-lg shadow-red-600/30">
+                <span>⏹️</span> Stop Recording & Save
+              </button>
             </div>
           </div>
         </div>
@@ -209,11 +214,14 @@
             <h3 class="text-xs font-semibold uppercase tracking-wider text-surface-400 flex items-center gap-1.5">
               <span>📱</span> Live Emulator Screen
             </h3>
-            <div class="flex items-center gap-2">
+            <div class="flex items-center gap-1.5">
               <span id="phoneStatusIndicator" class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-mono flex items-center gap-1">
                 <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span> Live
               </span>
-              <button id="refreshPhoneBtn" type="button" class="btn-ghost text-[11px] px-2 py-1">🔄 Refresh</button>
+              <button id="refreshPhoneBtn" type="button" class="btn-ghost text-[11px] px-2 py-1">🔄</button>
+              <button id="stopMobileRecordBtn" type="button" class="btn-primary text-[11px] px-2.5 py-1 bg-red-600 hover:bg-red-500 border-red-500/30 text-white font-semibold flex items-center gap-1 shadow-lg shadow-red-500/20 animate-pulse">
+                <span>⏹️</span> Stop & Save
+              </button>
             </div>
           </div>
           

@@ -123,9 +123,20 @@ function parseCodeToSteps(code, language) {
     if (line === '- launchApp' || line === 'launchApp') {
       description = 'Launch mobile application';
     }
-    const tapOnMatch = line.match(/tapOn:\s*["']?(.*?)["']?$/);
-    if (!description && tapOnMatch) {
+    const tapOnMatch = line.match(/tapOn:\s*["']?([^"']+)["']?$/);
+    if (!description && tapOnMatch && tapOnMatch[1].trim() !== '') {
       description = `Tap on element "${tapOnMatch[1]}"`;
+    }
+    const idMatch = line.match(/^\s*id:\s*["']?(.*?)["']?$/);
+    if (!description && idMatch) {
+      description = `Tap on element with ID "${idMatch[1]}"`;
+    }
+    const pointMatch = line.match(/^\s*point:\s*["']?(.*?)["']?$/);
+    if (!description && pointMatch) {
+      description = `Tap on screen point (${pointMatch[1]})`;
+    }
+    if (!description && (line.trim() === '- tapOn:' || line.trim() === 'tapOn:')) {
+      continue;
     }
     const inputTextMatch = line.match(/inputText:\s*["']?(.*?)["']?$/);
     if (!description && inputTextMatch) {
