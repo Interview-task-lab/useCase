@@ -496,3 +496,100 @@ select.input-field {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
 }
+
+/* ─── Platform Tabs ──────────────────────────────────────────────────────── */
+.platform-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: 10px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #94a3b8;
+  background: rgba(30, 41, 59, 0.5);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all 200ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.platform-tab:hover {
+  background: rgba(51, 65, 85, 0.6);
+  color: #f1f5f9;
+}
+
+.platform-tab-active {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.15), rgba(124, 58, 237, 0.1));
+  border-color: rgba(139, 92, 246, 0.3);
+  color: #a78bfa;
+  box-shadow: 0 0 12px rgba(139, 92, 246, 0.1);
+}
+
+/* ─── Mode Toggle Buttons ────────────────────────────────────────────────── */
+.mode-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border-radius: 8px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #94a3b8;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: all 200ms;
+}
+
+.mode-btn:hover {
+  color: #f1f5f9;
+  background: rgba(51, 65, 85, 0.5);
+}
+
+.mode-btn-active {
+  background: rgba(139, 92, 246, 0.2);
+  color: #a78bfa;
+}
+
+/* ─── Tap Indicator ──────────────────────────────────────────────────────── */
+.tap-indicator {
+  position: absolute;
+  width: 30px;
+  height: 30px;
+  margin-left: -15px;
+  margin-top: -15px;
+  border-radius: 50%;
+  background: rgba(139, 92, 246, 0.4);
+  border: 2px solid rgba(139, 92, 246, 0.8);
+  pointer-events: none;
+  animation: tap-ripple 600ms ease-out forwards;
+  z-index: 10;
+}
+
+@keyframes tap-ripple {
+  0% { transform: scale(0.3); opacity: 1; }
+  100% { transform: scale(2); opacity: 0; }
+}
+
+/* ─── Mobile Key Buttons ─────────────────────────────────────────────────── */
+.mobile-key-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #cbd5e1;
+  background: rgba(30, 41, 59, 0.7);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  cursor: pointer;
+  transition: all 200ms;
+}
+
+.mobile-key-btn:hover {
+  background: rgba(51, 65, 85, 0.8);
+  border-color: rgba(148, 163, 184, 0.25);
+  color: #f1f5f9;
+  transform: translateY(-1px);
+}

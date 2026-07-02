@@ -2,6 +2,7 @@
 const urlInput = document.getElementById('urlInput');
 const languageSelect = document.getElementById('languageSelect');
 const startBtn = document.getElementById('startBtn');
+const startMobileBtn = document.getElementById('startMobileBtn');
 const statusBadge = document.getElementById('statusBadge');
 const recordingBanner = document.getElementById('recordingBanner');
 const controlsSection = document.getElementById('controlsSection');
@@ -20,9 +21,25 @@ const modalTitle = document.getElementById('modalTitle');
 const modalBody = document.getElementById('modalBody');
 const closeModalBtn = document.getElementById('closeModalBtn');
 
+// Mobile Studio elements
+const mobileStudioSection = document.getElementById('mobileStudioSection');
+const mobileScreenshot = document.getElementById('mobileScreenshot');
+const mobileScreenLoading = document.getElementById('mobileScreenLoading');
+const mobileStepsContainer = document.getElementById('mobileStepsContainer');
+const mobileCodeOutput = document.getElementById('mobileCodeOutput');
+const mobileTextInput = document.getElementById('mobileTextInput');
+const sendTextBtn = document.getElementById('sendTextBtn');
+const stopMobileBtn = document.getElementById('stopMobileBtn');
+const appIdInput = document.getElementById('appIdInput');
+const mobileStudioPlatformBadge = document.getElementById('mobileStudioPlatformBadge');
+
 // ─── State ───────────────────────────────────────────────────────────────────
 let pollingInterval = null;
 let currentResult = null;
+let selectedPlatform = 'web';
+let mobileMode = 'tap'; // 'tap' | 'assert'
+let screenshotInterval = null;
+let isMobileStudioActive = false;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function showToast(message, type = 'info') {
@@ -57,6 +74,10 @@ function setStatusBadge(status) {
       badge.classList.add('status-completed');
       badge.querySelector('.status-text').textContent = 'Completed';
       break;
+    case 'mobile':
+      badge.classList.add('status-recording');
+      badge.querySelector('.status-text').textContent = 'Mobile Studio';
+      break;
     default:
       badge.classList.add('status-idle');
       badge.querySelector('.status-text').textContent = 'Idle';
@@ -69,7 +90,40 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
-// ─── Recording ───────────────────────────────────────────────────────────────
+// ─── Platform Selection ──────────────────────────────────────────────────────
+function selectPlatform(platform) {
+  selectedPlatform = platform;
+
+  // Update tab styles
+  document.querySelectorAll('.platform-tab').forEach(tab => tab.classList.remove('platform-tab-active'));
+  if (platform === 'web') {
+    document.getElementById('tabWeb').classList.add('platform-tab-active');
+    document.getElementById('webControls').classList.remove('hidden');
+    document.getElementById('mobileControls').classList.add('hidden');
+  } else if (platform === 'android') {
+    document.getElementById('tabAndroid').classList.add('platform-tab-active');
+    document.getElementById('webControls').classList.add('hidden');
+    document.getElementById('mobileControls').classList.remove('hidden');
+  } else {
+    document.getElementById('tabIos').classList.add('platform-tab-active');
+    document.getElementById('webControls').classList.add('hidden');
+    document.getElementById('mobileControls').classList.remove('hidden');
+  }
+}
+
+// ─── Mobile Mode Toggle ──────────────────────────────────────────────────────
+function setMobileMode(mode) {
+  mobileMode = mode;
+  document.getElementById('tapModeBtn').classList.toggle('mode-btn-active', mode === 'tap');
+  document.getElementById('assertModeBtn').classList.toggle('mode-btn-active', mode === 'assert');
+  
+  // Update cursor
+  if (mobileScreenshot) {
+    mobileScreenshot.style.cursor = mode === 'assert' ? 'pointer' : 'crosshair';
+  }
+}
+
+// ─── Web Recording ───────────────────────────────────────────────────────────
 async function startRecording() {
   const url = (urlInput && urlInput.value) ? urlInput.value.trim() : '';
   const language = languageSelect.value;
@@ -110,6 +164,262 @@ async function startRecording() {
     showToast(`Failed to start: ${err.message}`, 'error');
     resetStartButton();
   }
+}
+
+// ─── Mobile Studio ───────────────────────────────────────────────────────────
+async function startMobileStudio() {
+  const appId = appIdInput.value.trim() || 'com.ismailaslan.flutterloginapp';
+
+  try {
+    startMobileBtn.disabled = true;
+    startMobileBtn.innerHTML = `
+      <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>
+      Connecting…
+    `;
+
+    const res = await fetch('/api/record/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform: selectedPlatform, appId }),
+    });
+
+    const data = await res.json();
+
+    if (!data.success) {
+      showToast(data.message, 'error');
+      resetMobileButton();
+      return;
+    }
+
+    showToast(`Mobile Studio connected via Appium + WebdriverIO! (${selectedPlatform.toUpperCase()})`, 'success');
+    setStatusBadge('mobile');
+    isMobileStudioActive = true;
+
+    // Update platform badge
+    mobileStudioPlatformBadge.textContent = selectedPlatform.toUpperCase();
+
+    // Show mobile studio, hide controls
+    controlsSection.classList.add('hidden');
+    mobileStudioSection.classList.remove('hidden');
+    mobileStudioSection.classList.add('fade-in');
+
+    // Start screenshot polling
+    startScreenshotPolling();
+
+    // Set the completed result for saving
+    currentResult = data.data || { code: '', steps: [], url: appId, language: 'javascript', platform: selectedPlatform };
+
+  } catch (err) {
+    showToast(`Failed to start mobile studio: ${err.message}`, 'error');
+    resetMobileButton();
+  }
+}
+
+function resetMobileButton() {
+  startMobileBtn.disabled = false;
+  startMobileBtn.innerHTML = `
+    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>
+    Start Mobile Studio
+  `;
+}
+
+async function stopMobileStudio() {
+  isMobileStudioActive = false;
+  stopScreenshotPolling();
+
+  try {
+    await fetch('/api/mobile/stop', { method: 'POST' });
+  } catch (_) {}
+
+  setStatusBadge('completed');
+  mobileStudioSection.classList.add('hidden');
+
+  // Read the final code from the status endpoint
+  try {
+    const res = await fetch('/api/record/status');
+    const data = await res.json();
+    if (data.data) {
+      currentResult = data.data;
+    }
+  } catch (_) {}
+
+  if (currentResult && currentResult.code) {
+    renderSteps(currentResult.steps);
+    codeOutput.textContent = currentResult.code;
+    resultsSection.classList.remove('hidden');
+    resultsSection.classList.add('fade-in');
+  }
+
+  controlsSection.classList.remove('hidden');
+  resetMobileButton();
+  showToast('Mobile Studio stopped. Review your recorded test below.', 'success');
+}
+
+function startScreenshotPolling() {
+  // Initial screenshot
+  refreshScreenshot();
+
+  screenshotInterval = setInterval(refreshScreenshot, 2000);
+}
+
+function stopScreenshotPolling() {
+  if (screenshotInterval) {
+    clearInterval(screenshotInterval);
+    screenshotInterval = null;
+  }
+}
+
+async function refreshScreenshot() {
+  if (!isMobileStudioActive) return;
+  try {
+    const res = await fetch(`/api/mobile/screenshot?t=${Date.now()}`);
+    if (res.ok) {
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      mobileScreenshot.onload = () => URL.revokeObjectURL(url);
+      mobileScreenshot.src = url;
+      mobileScreenLoading.classList.add('hidden');
+    }
+  } catch (err) {
+    console.warn('Screenshot refresh failed:', err);
+  }
+}
+
+// ─── Mobile Tap / Assert ─────────────────────────────────────────────────────
+function handleMobileScreenClick(e) {
+  if (!isMobileStudioActive) return;
+
+  const rect = mobileScreenshot.getBoundingClientRect();
+  const normX = (e.clientX - rect.left) / rect.width;
+  const normY = (e.clientY - rect.top) / rect.height;
+
+  if (normX < 0 || normX > 1 || normY < 0 || normY > 1) return;
+
+  if (mobileMode === 'assert') {
+    performMobileAssert(normX, normY);
+  } else {
+    performMobileTap(normX, normY);
+  }
+}
+
+async function performMobileTap(normX, normY) {
+  try {
+    // Show tap indicator
+    showTapIndicator(normX, normY);
+
+    const res = await fetch('/api/mobile/tap', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ normX, normY }),
+    });
+
+    const data = await res.json();
+    if (data.success && data.data) {
+      updateMobileStudioUI(data.data);
+      // Refresh screenshot after a delay to show the result
+      setTimeout(refreshScreenshot, 500);
+    } else {
+      showToast(data.message || 'Tap failed', 'error');
+    }
+  } catch (err) {
+    showToast(`Tap failed: ${err.message}`, 'error');
+  }
+}
+
+async function performMobileAssert(normX, normY) {
+  try {
+    const res = await fetch('/api/mobile/assert-screen', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ normX, normY }),
+    });
+
+    const data = await res.json();
+    if (data.success && data.data) {
+      updateMobileStudioUI(data.data);
+      showToast('Assertion added!', 'success');
+    } else {
+      showToast(data.message || 'No element found to assert', 'error');
+    }
+  } catch (err) {
+    showToast(`Assert failed: ${err.message}`, 'error');
+  }
+}
+
+async function sendMobileText() {
+  const text = mobileTextInput.value;
+  if (!text) return;
+
+  try {
+    const res = await fetch('/api/mobile/input-text', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+
+    const data = await res.json();
+    if (data.success && data.data) {
+      updateMobileStudioUI(data.data);
+      mobileTextInput.value = '';
+      setTimeout(refreshScreenshot, 500);
+      showToast(`Text "${text}" sent`, 'success');
+    } else {
+      showToast(data.message || 'Failed to send text', 'error');
+    }
+  } catch (err) {
+    showToast(`Failed to send text: ${err.message}`, 'error');
+  }
+}
+
+async function sendMobileKey(key) {
+  try {
+    const res = await fetch('/api/mobile/key', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key }),
+    });
+
+    const data = await res.json();
+    if (data.success && data.data) {
+      updateMobileStudioUI(data.data);
+      setTimeout(refreshScreenshot, 500);
+    }
+  } catch (err) {
+    showToast(`Key press failed: ${err.message}`, 'error');
+  }
+}
+
+function updateMobileStudioUI(data) {
+  currentResult = data;
+
+  // Update steps
+  if (data.steps && data.steps.length > 0) {
+    mobileStepsContainer.innerHTML = data.steps
+      .map(s => `
+        <div class="step-item">
+          <div class="step-number">${s.step}</div>
+          <div class="step-description">${escapeHtml(s.description)}</div>
+        </div>
+      `)
+      .join('');
+    // Auto scroll to bottom
+    mobileStepsContainer.scrollTop = mobileStepsContainer.scrollHeight;
+  }
+
+  // Update code
+  if (data.code) {
+    mobileCodeOutput.textContent = data.code;
+  }
+}
+
+function showTapIndicator(normX, normY) {
+  const container = mobileScreenshot.parentElement;
+  const indicator = document.createElement('div');
+  indicator.className = 'tap-indicator';
+  indicator.style.left = `${normX * 100}%`;
+  indicator.style.top = `${normY * 100}%`;
+  container.appendChild(indicator);
+  setTimeout(() => indicator.remove(), 600);
 }
 
 function resetStartButton() {
@@ -222,9 +532,8 @@ function newRecording() {
   resultsSection.classList.add('hidden');
   setStatusBadge('idle');
   currentResult = null;
-  urlInput.value = '';
+  if (urlInput) urlInput.value = '';
   testNameInput.value = '';
-  urlInput.focus();
 }
 
 // ─── Save Test ───────────────────────────────────────────────────────────────
@@ -253,6 +562,8 @@ async function saveTest() {
         language: currentResult.language,
         code: currentResult.code,
         steps: currentResult.steps,
+        platform: currentResult.platform || selectedPlatform,
+        app_id: currentResult.url,
       }),
     });
 
@@ -292,6 +603,8 @@ async function loadSavedTests() {
       .map((tc) => {
         const date = new Date(tc.created_at).toLocaleString();
         const stepsCount = Array.isArray(tc.steps) ? tc.steps.length : 0;
+        const platformIcon = tc.platform === 'android' ? '🤖' : tc.platform === 'ios' ? '🍎' : '🌐';
+        const platformLabel = tc.platform ? tc.platform.toUpperCase() : 'WEB';
         return `
         <div class="saved-test-card fade-in">
           <div class="flex items-center gap-4 flex-1 min-w-0">
@@ -302,7 +615,7 @@ async function loadSavedTests() {
               <div class="font-semibold text-sm text-surface-100 truncate">${escapeHtml(tc.name)}</div>
               <div class="flex items-center gap-3 mt-1">
                 <span class="text-xs text-surface-500 truncate max-w-[200px]">${escapeHtml(tc.url || '—')}</span>
-                <span class="lang-badge">${escapeHtml(tc.language)}</span>
+                <span class="lang-badge">${platformIcon} ${platformLabel}</span>
                 <span class="text-xs text-surface-500">${stepsCount} steps</span>
               </div>
             </div>
@@ -466,7 +779,7 @@ async function runTest(id, name) {
             <div class="container">
               <div class="spinner"></div>
               <h2>Running Test "${name}"...</h2>
-              <p>Please wait while Playwright executes the test steps. This window will automatically display the HTML report as soon as it completes.</p>
+              <p>Please wait while the test executes. This window will automatically display the report as soon as it completes.</p>
             </div>
           </body>
         </html>
@@ -579,11 +892,19 @@ function resetRunBtn(id) {
 
 // ─── Event Listeners ─────────────────────────────────────────────────────────
 startBtn.addEventListener('click', startRecording);
+startMobileBtn.addEventListener('click', startMobileStudio);
+stopMobileBtn.addEventListener('click', stopMobileStudio);
 copyCodeBtn.addEventListener('click', copyCode);
 newRecordingBtn.addEventListener('click', newRecording);
 saveTestBtn.addEventListener('click', saveTest);
 refreshTestsBtn.addEventListener('click', loadSavedTests);
 closeModalBtn.addEventListener('click', closeModal);
+
+mobileScreenshot.addEventListener('click', handleMobileScreenClick);
+sendTextBtn.addEventListener('click', sendMobileText);
+mobileTextInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') sendMobileText();
+});
 
 detailModal.addEventListener('click', (e) => {
   if (e.target === detailModal) closeModal();

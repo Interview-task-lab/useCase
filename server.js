@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
 const { Pool } = require('pg');
 
 // ─── Express Setup ───────────────────────────────────────────────────────────
@@ -59,9 +59,16 @@ async function initDatabase() {
         language VARCHAR(50) NOT NULL,
         code TEXT NOT NULL,
         steps JSONB NOT NULL,
+        platform VARCHAR(20) DEFAULT 'web',
+        app_id VARCHAR(255) DEFAULT '',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
+    // Add platform and app_id columns if missing (migration)
+    try {
+      await pool.query(`ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS platform VARCHAR(20) DEFAULT 'web'`);
+      await pool.query(`ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS app_id VARCHAR(255) DEFAULT ''`);
+    } catch (_) {}
     console.log('✅ Database connected & test_cases table ready.');
   } catch (err) {
     console.error('⚠️  Could not connect to PostgreSQL. Test saving will be unavailable.');
@@ -70,17 +77,25 @@ async function initDatabase() {
   }
 }
 
-// ─── Active Process Tracker ──────────────────────────────────────────────────
+// ─── Active Process Tracker (Playwright Web Recording) ───────────────────────
 let activeProcess = null;
 let processExited = false;
 let processExitCode = null;
 let processError = null;
 let lastRecordingUrl = '';
 let lastRecordingLanguage = '';
+let lastRecordingPlatform = 'web';
 let killTimeout = null;
 
 const MAX_EXECUTION_MS = 10 * 60 * 1000; // 10 minutes
 const OUTPUT_FILE = path.join(TEMP_DIR, 'raw_script.js');
+
+function getOutputFile() {
+  if (lastRecordingPlatform === 'android' || lastRecordingPlatform === 'ios') {
+    return path.join(TEMP_DIR, 'raw_script.js'); // WDIO scripts are also JS
+  }
+  return OUTPUT_FILE;
+}
 
 function cleanupProcess() {
   if (killTimeout) {
@@ -96,6 +111,134 @@ let runnerState = 'idle'; // idle | running | completed | error
 let runnerTestId = null;
 let runnerOutput = '';
 let runnerReportPath = null;
+
+// ─── Appium / WebdriverIO Session ────────────────────────────────────────────
+let appiumProcess = null;
+let wdioSession = null;
+let wdioSessionPlatform = null;
+let wdioSessionAppId = null;
+
+async function ensureAppiumRunning() {
+  // Check if Appium is already running on port 4723
+  try {
+    const resp = await fetch('http://127.0.0.1:4723/status');
+    if (resp.ok) {
+      console.log('✅ Appium server already running on port 4723');
+      return;
+    }
+  } catch (_) {}
+
+  // Start Appium as a child process
+  console.log('🚀 Starting Appium server on port 4723...');
+  appiumProcess = spawn('appium', ['--port', '4723', '--relaxed-security'], {
+    stdio: 'pipe',
+    shell: true,
+  });
+
+  appiumProcess.stdout.on('data', (d) => console.log(`[appium] ${d.toString().trim()}`));
+  appiumProcess.stderr.on('data', (d) => console.log(`[appium] ${d.toString().trim()}`));
+  appiumProcess.on('close', (code) => {
+    console.log(`[appium] Process exited with code ${code}`);
+    appiumProcess = null;
+  });
+
+  // Wait for Appium to be ready (max ~15 seconds)
+  for (let i = 0; i < 30; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    try {
+      const resp = await fetch('http://127.0.0.1:4723/status');
+      if (resp.ok) {
+        console.log('✅ Appium server is ready');
+        return;
+      }
+    } catch (_) {}
+  }
+  console.warn('⚠️  Appium may not be fully ready yet');
+}
+
+async function createWdioSession(platform, appId) {
+  // If already have a matching session, reuse it
+  if (wdioSession && wdioSessionPlatform === platform && wdioSessionAppId === appId) {
+    try {
+      // Verify session is alive
+      await wdioSession.getTitle();
+      return wdioSession;
+    } catch (_) {
+      wdioSession = null;
+    }
+  }
+
+  // Destroy existing session if it exists
+  await destroyWdioSession();
+
+  const { remote } = require('webdriverio');
+
+  let capabilities;
+  if (platform === 'android') {
+    capabilities = {
+      platformName: 'Android',
+      'appium:automationName': 'UiAutomator2',
+      'appium:appPackage': appId || 'com.ismailaslan.flutterloginapp',
+      'appium:appActivity': '.MainActivity',
+      'appium:noReset': true,
+      'appium:newCommandTimeout': 600,
+      'appium:uiautomator2ServerInstallTimeout': 60000,
+    };
+  } else {
+    // iOS
+    const udid = getBootedSimulatorUDID();
+    capabilities = {
+      platformName: 'iOS',
+      'appium:automationName': 'XCUITest',
+      'appium:bundleId': appId || 'com.ismailaslan.flutterloginapp',
+      'appium:noReset': true,
+      'appium:newCommandTimeout': 600,
+      'appium:udid': udid !== 'booted' ? udid : undefined,
+    };
+  }
+
+  console.log(`📱 Creating WebdriverIO ${platform.toUpperCase()} session with capabilities:`, JSON.stringify(capabilities));
+
+  wdioSession = await remote({
+    hostname: '127.0.0.1',
+    port: 4723,
+    path: '/',
+    capabilities,
+    logLevel: 'warn',
+    connectionRetryTimeout: 60000,
+    connectionRetryCount: 3,
+  });
+
+  wdioSessionPlatform = platform;
+  wdioSessionAppId = appId;
+  console.log(`✅ WebdriverIO ${platform.toUpperCase()} session created successfully`);
+  return wdioSession;
+}
+
+async function destroyWdioSession() {
+  if (wdioSession) {
+    try {
+      await wdioSession.deleteSession();
+    } catch (_) {}
+    wdioSession = null;
+    wdioSessionPlatform = null;
+    wdioSessionAppId = null;
+    console.log('🔌 WebdriverIO session destroyed');
+  }
+}
+
+function getBootedSimulatorUDID() {
+  try {
+    const out = execSync('xcrun simctl list devices booted --json', { encoding: 'utf-8' });
+    const json = JSON.parse(out);
+    for (const runtime of Object.values(json.devices || {})) {
+      for (const device of runtime) {
+        if (device.state === 'Booted') return device.udid;
+      }
+    }
+  } catch (_) {}
+  return 'booted';
+}
 
 // ─── Code-to-Steps Parser ───────────────────────────────────────────────────
 function parseCodeToSteps(code, language) {
@@ -113,15 +256,59 @@ function parseCodeToSteps(code, language) {
       line.startsWith('from ') || line.startsWith('async ') || line.startsWith('await browser') ||
       line.startsWith('await context') || line === '});' || line === '})' || line === '}' ||
       line === '{' || line.startsWith('test(') || line.startsWith('test.describe') ||
-      line.startsWith('module.') || line.startsWith('exports.') || line.startsWith('require(')) {
+      line.startsWith('module.') || line.startsWith('exports.') || line.startsWith('require(') ||
+      line.startsWith('describe(') || line.startsWith('it(') || line.startsWith('before(') ||
+      line.startsWith('after(')) {
       continue;
     }
 
     let description = null;
 
+    // ── WDIO mobile patterns ──
+    // $('~id').click()
+    const wdioClickId = line.match(/\$\(['"]~(.*?)['"]\)\.click/);
+    if (!description && wdioClickId) {
+      description = `Tap on element with ID "${wdioClickId[1]}"`;
+    }
+
+    // $('~id').setValue('text')
+    const wdioSetValue = line.match(/\$\(['"]~(.*?)['"]\)\.setValue\(['"](.+?)['"]\)/);
+    if (!description && wdioSetValue) {
+      description = `Input "${wdioSetValue[2]}" into element "${wdioSetValue[1]}"`;
+    }
+
+    // $('~id').addValue('text')
+    const wdioAddValue = line.match(/\$\(['"]~(.*?)['"]\)\.addValue\(['"](.+?)['"]\)/);
+    if (!description && wdioAddValue) {
+      description = `Type "${wdioAddValue[2]}" into element "${wdioAddValue[1]}"`;
+    }
+
+    // expect($('~id')).toBeDisplayed()
+    const wdioAssertDisplayed = line.match(/expect\(\$\(['"]~(.*?)['"]\)\)\.toBeDisplayed/);
+    if (!description && wdioAssertDisplayed) {
+      description = `Assert element "${wdioAssertDisplayed[1]}" is visible`;
+    }
+
+    // driver.activateApp
+    const activateApp = line.match(/driver\.activateApp\(['"](.+?)['"]\)/);
+    if (!description && activateApp) {
+      description = `Launch app "${activateApp[1]}"`;
+    }
+
+    // driver.pressKeyCode or driver.execute('mobile: pressButton'
+    if (!description && (line.includes('pressKeyCode') || line.includes('pressButton'))) {
+      description = 'Press key/button';
+    }
+
+    // driver.touchAction or driver.action('pointer')
+    if (!description && (line.includes('touchAction') || line.includes("action('pointer')"))) {
+      description = 'Tap on screen coordinates';
+    }
+
+    // ── Playwright patterns ──
     // page.goto
     const gotoMatch = line.match(/\.goto\(['"](.*?)['"]/);
-    if (gotoMatch) {
+    if (!description && gotoMatch) {
       description = `Navigate to "${gotoMatch[1]}"`;
     }
 
@@ -213,7 +400,7 @@ function parseCodeToSteps(code, language) {
     }
 
     // getByRole click (simpler pattern)
-    const getByRoleClick = line.match(/\.(?:get_by_role|getByRole)\(['"](.*?)['"].*\)\.click/);
+    const getByRoleClick = line.match(/\.(?:get_by_role|getByRole)\(['"](.*?)['"]\.*\)\.click/);
     if (!description && getByRoleClick) {
       description = `Click ${getByRoleClick[1]}`;
     }
@@ -225,7 +412,6 @@ function parseCodeToSteps(code, language) {
 
     // Fallback: if the line has an await and looks like an action
     if (!description && line.includes('await') && !line.includes('newPage') && !line.includes('newContext')) {
-      // Clean up the line for a readable fallback
       const cleaned = line.replace(/await\s+/, '').replace(/;$/, '').trim();
       if (cleaned.length > 0 && cleaned.length < 120) {
         description = `Action: ${cleaned}`;
@@ -242,7 +428,7 @@ function parseCodeToSteps(code, language) {
 }
 
 // ─── API: Start Recording ────────────────────────────────────────────────────
-app.post('/api/record/start', (req, res) => {
+app.post('/api/record/start', async (req, res) => {
   if (activeProcess) {
     return res.status(409).json({
       success: false,
@@ -250,17 +436,20 @@ app.post('/api/record/start', (req, res) => {
     });
   }
 
-  const { url, language } = req.body;
+  const { url, language, platform, appId } = req.body;
   const cfg = getConfig();
+  const targetPlatform = platform || 'web';
   const targetUrl = url || cfg.targetUrl || 'https://www.enuygun.com/';
 
   const targetLang = language || 'javascript';
-  lastRecordingUrl = targetUrl;
+  lastRecordingUrl = targetPlatform === 'web' ? targetUrl : (appId || 'com.ismailaslan.flutterloginapp');
   lastRecordingLanguage = targetLang;
+  lastRecordingPlatform = targetPlatform;
 
   // Clean up previous output file
-  if (fs.existsSync(OUTPUT_FILE)) {
-    fs.unlinkSync(OUTPUT_FILE);
+  const outFile = getOutputFile();
+  if (fs.existsSync(outFile)) {
+    fs.unlinkSync(outFile);
   }
 
   // Ensure temp dir exists
@@ -272,7 +461,36 @@ app.post('/api/record/start', (req, res) => {
   processExitCode = null;
   processError = null;
 
-  const args = ['playwright', 'codegen', url, `--target=${targetLang}`, `--output=${OUTPUT_FILE}`];
+  if (targetPlatform === 'android' || targetPlatform === 'ios') {
+    // ── Mobile: Start Appium + WDIO Session ──
+    try {
+      await ensureAppiumRunning();
+      const targetAppId = appId || 'com.ismailaslan.flutterloginapp';
+      await createWdioSession(targetPlatform, targetAppId);
+
+      // Write initial empty script
+      const initialCode = `// 📱 Live Mobile Studio (${targetPlatform.toUpperCase()}) - WebdriverIO\n// App: ${targetAppId}\n\n`;
+      fs.writeFileSync(getOutputFile(), initialCode, 'utf-8');
+
+      processExited = true;
+      processExitCode = 0;
+
+      return res.json({
+        success: true,
+        mode: 'mobile-live',
+        message: `Live Mobile Studio started for ${targetPlatform.toUpperCase()} via Appium + WebdriverIO!`,
+      });
+    } catch (err) {
+      console.error('❌ Failed to start mobile session:', err.message);
+      return res.status(500).json({
+        success: false,
+        message: `Failed to start mobile session: ${err.message}`,
+      });
+    }
+  }
+
+  // ── Web: Playwright Codegen ──
+  const args = ['playwright', 'codegen', url, `--target=${targetLang}`, `--output=${getOutputFile()}`];
 
   console.log(`🎬 Starting recording: npx ${args.join(' ')}`);
 
@@ -342,9 +560,10 @@ app.get('/api/record/status', (req, res) => {
     }
 
     // Try to read the output file
-    if (fs.existsSync(OUTPUT_FILE)) {
+    const outFile = getOutputFile();
+    if (fs.existsSync(outFile)) {
       try {
-        let code = fs.readFileSync(OUTPUT_FILE, 'utf-8');
+        let code = fs.readFileSync(outFile, 'utf-8');
         // Automatically uncomment assertions generated as comments
         code = code.replace(/^\s*\/\/\s*(await\s+expect\(.*)/gm, '  $1');
         const steps = parseCodeToSteps(code, lastRecordingLanguage);
@@ -357,6 +576,7 @@ app.get('/api/record/status', (req, res) => {
             steps,
             url: lastRecordingUrl,
             language: lastRecordingLanguage,
+            platform: lastRecordingPlatform,
           },
         });
       } catch (err) {
@@ -374,6 +594,7 @@ app.get('/api/record/status', (req, res) => {
           steps: [],
           url: lastRecordingUrl,
           language: lastRecordingLanguage,
+          platform: lastRecordingPlatform,
         },
       });
     }
@@ -386,9 +607,387 @@ app.get('/api/record/status', (req, res) => {
   });
 });
 
+// ─── API: Update Recorded/Edited Code ────────────────────────────────────────
+app.post('/api/record/update-code', (req, res) => {
+  const { code, language } = req.body;
+  if (typeof code !== 'string') {
+    return res.status(400).json({ success: false, message: 'Invalid code' });
+  }
+  const lang = language || lastRecordingLanguage || 'javascript';
+  try {
+    fs.writeFileSync(getOutputFile(), code, 'utf-8');
+  } catch (_) {}
+  const steps = parseCodeToSteps(code, lang);
+  return res.json({
+    success: true,
+    data: {
+      code,
+      steps,
+      url: lastRecordingUrl,
+      language: lang,
+      platform: lastRecordingPlatform,
+    },
+  });
+});
+
+// ─── API: Mobile Screenshot ──────────────────────────────────────────────────
+app.get('/api/mobile/screenshot', async (req, res) => {
+  try {
+    if (!wdioSession) {
+      return res.status(400).send('No active mobile session');
+    }
+    const base64 = await wdioSession.takeScreenshot();
+    const imgBuffer = Buffer.from(base64, 'base64');
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    return res.send(imgBuffer);
+  } catch (e) {
+    console.error('[Screenshot] Error:', e.message);
+    return res.status(500).send('Screenshot failed: ' + e.message);
+  }
+});
+
+// ─── API: Mobile Tap ─────────────────────────────────────────────────────────
+app.post('/api/mobile/tap', async (req, res) => {
+  const { normX, normY } = req.body;
+  try {
+    if (!wdioSession) {
+      return res.status(400).json({ success: false, message: 'No active mobile session' });
+    }
+
+    // Get screen size from the session
+    const windowSize = await wdioSession.getWindowSize();
+    const devW = windowSize.width;
+    const devH = windowSize.height;
+    const tapX = Math.round(normX * devW);
+    const tapY = Math.round(normY * devH);
+
+    console.log(`[Tap] Click norm: (${normX.toFixed(3)}, ${normY.toFixed(3)}) calculated tap: (${tapX}, ${tapY}) screen size: ${devW}x${devH}`);
+
+    // Get page source XML and find the element at the tap coordinates
+    const pageSource = await wdioSession.getPageSource();
+    console.log(`[Tap] Page source length: ${pageSource ? pageSource.length : 0}`);
+    const bestElement = findElementAtCoords(pageSource, tapX, tapY, wdioSessionPlatform);
+
+    // Always perform coordinate tap on the device to be fast and 100% reliable in the live studio
+    await performCoordinateTap(wdioSession, tapX, tapY);
+
+    let stepCode = '';
+    if (bestElement && bestElement.selector) {
+      console.log(`[Tap] Resolved selector: ${bestElement.selector}`);
+      stepCode = `  await $('${bestElement.selector}').click();`;
+    } else {
+      console.log(`[Tap] No selector resolved, falling back to coordinate code`);
+      stepCode = `  // Tap at coordinates (${tapX}, ${tapY})\n  await driver.action('pointer').move({ x: ${tapX}, y: ${tapY} }).down().up().perform();`;
+    }
+
+    // Append step to output file
+    const outFile = getOutputFile();
+    let currentCode = fs.existsSync(outFile) ? fs.readFileSync(outFile, 'utf-8') : '';
+    currentCode = currentCode.trimEnd() + '\n' + stepCode + '\n';
+    fs.writeFileSync(outFile, currentCode, 'utf-8');
+    const steps = parseCodeToSteps(currentCode, 'javascript');
+
+    return res.json({ success: true, step: stepCode, data: { code: currentCode, steps, language: 'javascript' } });
+  } catch (err) {
+    console.error('[Tap] Error:', err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ─── API: Mobile Input Text ──────────────────────────────────────────────────
+app.post('/api/mobile/input-text', async (req, res) => {
+  const { text } = req.body;
+  try {
+    if (!wdioSession) {
+      return res.status(400).json({ success: false, message: 'No active mobile session' });
+    }
+
+    // Find the focused/active element and type into it
+    const activeEl = await wdioSession.getActiveElement();
+    if (activeEl) {
+      const elementId = activeEl.ELEMENT || activeEl['element-6066-11e4-a52e-4f735466cecf'];
+      if (elementId) {
+        await wdioSession.elementSendKeys(elementId, text);
+      } else {
+        await wdioSession.keys(text);
+      }
+    } else {
+      // Fallback: use keyboard
+      await wdioSession.keys(text);
+    }
+
+    // Find what element was focused to generate a better selector
+    let stepCode = '';
+    try {
+      const pageSource = await wdioSession.getPageSource();
+      const focusedSelector = findFocusedElementSelector(pageSource, wdioSessionPlatform);
+      if (focusedSelector) {
+        stepCode = `  await $('${focusedSelector}').setValue('${text.replace(/'/g, "\\'")}');`;
+      } else {
+        stepCode = `  await driver.keys('${text.replace(/'/g, "\\'")}');`;
+      }
+    } catch (_) {
+      stepCode = `  await driver.keys('${text.replace(/'/g, "\\'")}');`;
+    }
+
+    const outFile = getOutputFile();
+    let currentCode = fs.existsSync(outFile) ? fs.readFileSync(outFile, 'utf-8') : '';
+    currentCode = currentCode.trimEnd() + '\n' + stepCode + '\n';
+    fs.writeFileSync(outFile, currentCode, 'utf-8');
+    const steps = parseCodeToSteps(currentCode, 'javascript');
+
+    return res.json({ success: true, data: { code: currentCode, steps, language: 'javascript' } });
+  } catch (err) {
+    console.error('[Input] Error:', err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ─── API: Mobile Key Press ───────────────────────────────────────────────────
+app.post('/api/mobile/key', async (req, res) => {
+  const { key } = req.body;
+  try {
+    if (!wdioSession) {
+      return res.status(400).json({ success: false, message: 'No active mobile session' });
+    }
+
+    const keyMap = { 'ENTER': 66, 'BACK': 4, 'HOME': 3, 'TAB': 61, 'DELETE': 67 };
+
+    if (wdioSessionPlatform === 'android') {
+      const keyCode = keyMap[key.toUpperCase()] || 66;
+      await wdioSession.pressKeyCode(keyCode);
+    } else {
+      // iOS
+      if (key.toUpperCase() === 'ENTER') {
+        await wdioSession.keys(['\n']);
+      } else if (key.toUpperCase() === 'DELETE') {
+        await wdioSession.keys(['\b']);
+      } else {
+        await wdioSession.execute('mobile: pressButton', { name: key.toLowerCase() });
+      }
+    }
+
+    const keyName = key.charAt(0).toUpperCase() + key.slice(1).toLowerCase();
+    let stepCode;
+    if (wdioSessionPlatform === 'android') {
+      stepCode = `  await driver.pressKeyCode(${keyMap[key.toUpperCase()] || 66}); // ${keyName}`;
+    } else {
+      stepCode = `  await driver.execute('mobile: pressButton', { name: '${key.toLowerCase()}' }); // ${keyName}`;
+    }
+
+    const outFile = getOutputFile();
+    let currentCode = fs.existsSync(outFile) ? fs.readFileSync(outFile, 'utf-8') : '';
+    currentCode = currentCode.trimEnd() + '\n' + stepCode + '\n';
+    fs.writeFileSync(outFile, currentCode, 'utf-8');
+    const steps = parseCodeToSteps(currentCode, 'javascript');
+
+    return res.json({ success: true, data: { code: currentCode, steps, language: 'javascript' } });
+  } catch (err) {
+    console.error('[Key] Error:', err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ─── API: Mobile Assert Screen ───────────────────────────────────────────────
+app.post('/api/mobile/assert-screen', async (req, res) => {
+  const { normX, normY } = req.body;
+  try {
+    if (!wdioSession) {
+      return res.status(400).json({ success: false, message: 'No active mobile session' });
+    }
+
+    const windowSize = await wdioSession.getWindowSize();
+    const devW = windowSize.width;
+    const devH = windowSize.height;
+    const tapX = Math.round(normX * devW);
+    const tapY = Math.round(normY * devH);
+
+    const pageSource = await wdioSession.getPageSource();
+    const bestElement = findElementAtCoords(pageSource, tapX, tapY, wdioSessionPlatform);
+
+    if (!bestElement || !bestElement.selector) {
+      return res.status(404).json({ success: false, message: 'No UI element found at clicked coordinate to assert.' });
+    }
+
+    const stepCode = `  await expect($('${bestElement.selector}')).toBeDisplayed();`;
+
+    const outFile = getOutputFile();
+    let currentCode = fs.existsSync(outFile) ? fs.readFileSync(outFile, 'utf-8') : '';
+    currentCode = currentCode.trimEnd() + '\n' + stepCode + '\n';
+    fs.writeFileSync(outFile, currentCode, 'utf-8');
+    const steps = parseCodeToSteps(currentCode, 'javascript');
+
+    return res.json({ success: true, step: stepCode, data: { code: currentCode, steps, language: 'javascript' } });
+  } catch (err) {
+    console.error('[Assert] Error:', err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ─── API: Mobile Assert Custom ───────────────────────────────────────────────
+app.post('/api/mobile/assert-custom', (req, res) => {
+  const { type, value } = req.body;
+  if (!value || !value.trim()) {
+    return res.status(400).json({ success: false, message: 'Assertion value is required' });
+  }
+  const val = value.trim().replace(/'/g, "\\'");
+  let stepCode = '';
+  if (type === 'visible-id') {
+    stepCode = `  await expect($('~${val}')).toBeDisplayed();`;
+  } else if (type === 'visible-text') {
+    stepCode = `  await expect($('//*[@text="${val}"]')).toBeDisplayed();`;
+  } else if (type === 'not-visible-id') {
+    stepCode = `  await expect($('~${val}')).not.toBeDisplayed();`;
+  } else if (type === 'not-visible-text') {
+    stepCode = `  await expect($('//*[@text="${val}"]')).not.toBeDisplayed();`;
+  } else {
+    stepCode = `  await expect($('~${val}')).toBeDisplayed();`;
+  }
+
+  const outFile = getOutputFile();
+  let currentCode = fs.existsSync(outFile) ? fs.readFileSync(outFile, 'utf-8') : '';
+  currentCode = currentCode.trimEnd() + '\n' + stepCode + '\n';
+  fs.writeFileSync(outFile, currentCode, 'utf-8');
+  const steps = parseCodeToSteps(currentCode, 'javascript');
+  return res.json({ success: true, step: stepCode, data: { code: currentCode, steps, language: 'javascript' } });
+});
+
+// ─── API: Stop Mobile Session ────────────────────────────────────────────────
+app.post('/api/mobile/stop', async (req, res) => {
+  await destroyWdioSession();
+  lastRecordingPlatform = 'web';
+  return res.json({ success: true, message: 'Mobile session stopped.' });
+});
+
+// ─── Helper: Find element at coordinates from page source XML ────────────────
+function findElementAtCoords(xmlSource, tapX, tapY, platform) {
+  // Parse bounds from XML elements
+  const regex = /<[^/][^>]*\s(bounds="[^"]*"|x="[^"]*"\s+y="[^"]*"\s+width="[^"]*"\s+height="[^"]*")[^>]*>/g;
+  let match;
+  let bestNode = null;
+  let smallestArea = Infinity;
+
+  if (platform === 'ios') {
+    // iOS XCUITest XML format: x, y, width, height attributes
+    const iosRegex = /<([A-Z][A-Za-z]*)\s+([^>]*)\/?>(?:<\/\1>)?/g;
+    while ((match = iosRegex.exec(xmlSource)) !== null) {
+      const tag = match[1];
+      const attrStr = match[2];
+
+      const xM = attrStr.match(/\bx="(\d+)"/);
+      const yM = attrStr.match(/\by="(\d+)"/);
+      const wM = attrStr.match(/\bwidth="(\d+)"/);
+      const hM = attrStr.match(/\bheight="(\d+)"/);
+      if (!xM || !yM || !wM || !hM) continue;
+
+      const left = parseInt(xM[1]);
+      const top = parseInt(yM[1]);
+      const width = parseInt(wM[1]);
+      const height = parseInt(hM[1]);
+      const right = left + width;
+      const bottom = top + height;
+      const area = width * height;
+
+      if (tapX >= left && tapX <= right && tapY >= top && tapY <= bottom && area > 0 && area < smallestArea) {
+        const nameM = attrStr.match(/\bname="([^"]*)"/);
+        const labelM = attrStr.match(/\blabel="([^"]*)"/);
+        const valueM = attrStr.match(/\bvalue="([^"]*)"/);
+
+        const name = nameM ? nameM[1] : '';
+        const label = labelM ? labelM[1] : '';
+
+        let selector = '';
+        if (name) {
+          selector = `~${name}`;
+        } else if (label && label.length < 50) {
+          selector = `~${label}`;
+        }
+
+        if (selector || name || label) {
+          bestNode = { selector, text: label || name, tag, area };
+          smallestArea = area;
+        }
+      }
+    }
+  } else {
+    // Android UiAutomator2 XML format: bounds="[left,top][right,bottom]"
+    const androidRegex = /<([a-zA-Z0-9._-]+)\s+([^>]+)\/?>/g;
+    while ((match = androidRegex.exec(xmlSource)) !== null) {
+      const attrStr = match[2];
+      const boundsMatch = attrStr.match(/bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/);
+      if (!boundsMatch) continue;
+
+      const left = parseInt(boundsMatch[1], 10);
+      const top = parseInt(boundsMatch[2], 10);
+      const right = parseInt(boundsMatch[3], 10);
+      const bottom = parseInt(boundsMatch[4], 10);
+      const area = (right - left) * (bottom - top);
+
+      if (tapX >= left && tapX <= right && tapY >= top && tapY <= bottom && area > 0 && area < smallestArea) {
+        const textMatch = attrStr.match(/text="([^"]*)"/);
+        const idMatch = attrStr.match(/resource-id="([^"]*)"/);
+        const descMatch = attrStr.match(/content-desc="([^"]*)"/);
+
+        const text = textMatch ? textMatch[1] : '';
+        const resourceId = idMatch ? idMatch[1] : '';
+        const contentDesc = descMatch ? descMatch[1] : '';
+
+        console.log(`[findElementAtCoords] Candidate: bounds=[${left},${top}][${right},${bottom}] area=${area} resource-id="${resourceId}" content-desc="${contentDesc}" text="${text}"`);
+
+        let selector = '';
+        if (contentDesc) {
+          selector = `~${contentDesc}`;
+        } else if (resourceId && !resourceId.includes('android:id')) {
+          let resId = resourceId;
+          if (resId.includes(':id/')) resId = resId.split(':id/')[1];
+          selector = `~${resId}`;
+        } else if (text && text.length < 50) {
+          selector = `//*[@text="${text}"]`;
+        }
+
+        if (selector || text || resourceId || contentDesc) {
+          bestNode = { selector, text: contentDesc || text, resourceId, area };
+          smallestArea = area;
+        }
+      }
+    }
+  }
+
+  return bestNode;
+}
+
+function findFocusedElementSelector(xmlSource, platform) {
+  if (platform === 'android') {
+    const focusedMatch = xmlSource.match(/<[a-zA-Z0-9._-]+\s+[^>]*focused="true"[^>]*>/);
+    if (focusedMatch) {
+      const attrStr = focusedMatch[0];
+      const descMatch = attrStr.match(/content-desc="([^"]+)"/);
+      const idMatch = attrStr.match(/resource-id="([^"]+)"/);
+      if (descMatch) return `~${descMatch[1]}`;
+      if (idMatch) {
+        let resId = idMatch[1];
+        if (resId.includes(':id/')) resId = resId.split(':id/')[1];
+        return `~${resId}`;
+      }
+    }
+  }
+  return null;
+}
+
+async function performCoordinateTap(session, x, y) {
+  await session.action('pointer', {
+    parameters: { pointerType: 'touch' },
+  })
+    .move({ x, y, origin: 'viewport' })
+    .down()
+    .up()
+    .perform();
+}
+
 // ─── API: Save Test Case ─────────────────────────────────────────────────────
 app.post('/api/test-cases', async (req, res) => {
-  let { name, url, language, code, steps } = req.body;
+  let { name, url, language, code, steps, platform, app_id } = req.body;
 
   if (!name || !code) {
     return res.status(400).json({ success: false, message: 'Name and code are required.' });
@@ -405,10 +1004,10 @@ app.post('/api/test-cases', async (req, res) => {
 
   try {
     const result = await pool.query(
-      `INSERT INTO test_cases (name, url, language, code, steps)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO test_cases (name, url, language, code, steps, platform, app_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING *`,
-      [name, url || '', language || 'javascript', code, JSON.stringify(steps || [])]
+      [name, url || '', language || 'javascript', code, JSON.stringify(steps || []), platform || 'web', app_id || '']
     );
     return res.json({ success: true, testCase: result.rows[0] });
   } catch (err) {
@@ -457,15 +1056,7 @@ app.post('/api/test-cases/:id/run', async (req, res) => {
     }
 
     const tc = result.rows[0];
-    const language = tc.language || 'javascript';
-
-    // Only JavaScript tests can be run directly
-    if (!['javascript', 'playwright-test'].includes(language)) {
-      return res.status(400).json({
-        success: false,
-        message: `Running ${language} tests is not supported yet. Only JavaScript tests can be run.`,
-      });
-    }
+    const tcPlatform = tc.platform || 'web';
 
     // Prepare report directory
     const reportDir = path.join(REPORTS_DIR, `test-${testId}`);
@@ -474,17 +1065,90 @@ app.post('/api/test-cases/:id/run', async (req, res) => {
     }
     fs.mkdirSync(reportDir, { recursive: true });
 
-    // Convert standalone script to Playwright Test format
-    const testCode = convertToPlaywrightTest(tc.code, tc.name);
+    // Reset runner state
+    runnerState = 'running';
+    runnerTestId = testId;
+    runnerOutput = '';
+    runnerReportPath = `/reports/test-${testId}/index.html`;
 
-    // Write test file to project root so @playwright/test resolves from node_modules
-    const testFile = path.join(__dirname, `run_test_${testId}.spec.js`);
-    fs.writeFileSync(testFile, testCode, 'utf-8');
+    if (tcPlatform === 'android' || tcPlatform === 'ios') {
+      // ── Mobile: Run with WDIO ──
+      const wdioTestCode = convertToWdioTest(tc.code, tc.name, tcPlatform, tc.app_id || tc.url);
+      const testFile = path.join(__dirname, `run_test_${testId}.wdio.js`);
+      fs.writeFileSync(testFile, wdioTestCode, 'utf-8');
 
-    // Write a minimal playwright config to project root
-    const cfg = getConfig();
-    const configFile = path.join(__dirname, `playwright_run_${testId}.config.js`);
-    const configContent = `
+      // Generate WDIO config for this test
+      const wdioConfigFile = path.join(__dirname, `wdio_run_${testId}.conf.js`);
+      const wdioConfigContent = generateWdioConfig(testFile, tcPlatform, tc.app_id || tc.url, reportDir);
+      fs.writeFileSync(wdioConfigFile, wdioConfigContent, 'utf-8');
+
+      console.log(`▶️  Running mobile test #${testId} (${tcPlatform}): "${tc.name}"`);
+
+      // Ensure Appium is running
+      await ensureAppiumRunning();
+
+      const args = ['wdio', 'run', wdioConfigFile];
+      runnerProcess = spawn('npx', args, {
+        cwd: __dirname,
+        stdio: 'pipe',
+        shell: true,
+      });
+
+      runnerProcess.stdout.on('data', (data) => {
+        const text = data.toString();
+        runnerOutput += text;
+        console.log(`[wdio stdout] ${text.trim()}`);
+      });
+
+      runnerProcess.stderr.on('data', (data) => {
+        const text = data.toString();
+        runnerOutput += text;
+        console.log(`[wdio stderr] ${text.trim()}`);
+      });
+
+      runnerProcess.on('error', (err) => {
+        console.error('❌ WDIO runner error:', err.message);
+        runnerState = 'error';
+        runnerOutput += `\nError: ${err.message}`;
+        runnerProcess = null;
+      });
+
+      runnerProcess.on('close', (code) => {
+        console.log(`🏁 Mobile Test #${testId} finished with exit code ${code}`);
+        runnerState = 'completed';
+        runnerProcess = null;
+
+        // Generate a simple HTML report
+        generateMobileReport(reportDir, tc, runnerOutput, code);
+
+        // Clean up temporary files
+        try { fs.unlinkSync(testFile); } catch (_) {}
+        try { fs.unlinkSync(wdioConfigFile); } catch (_) {}
+      });
+
+      return res.json({
+        success: true,
+        message: `Mobile test "${tc.name}" is now running via WebdriverIO...`,
+      });
+    } else {
+      // ── Web: Playwright Test ──
+      const language = tc.language || 'javascript';
+      if (!['javascript', 'playwright-test'].includes(language)) {
+        runnerState = 'idle';
+        return res.status(400).json({
+          success: false,
+          message: `Running ${language} tests is not supported yet. Only JavaScript tests can be run.`,
+        });
+      }
+
+      const testCode = convertToPlaywrightTest(tc.code, tc.name);
+
+      const testFile = path.join(__dirname, `run_test_${testId}.spec.js`);
+      fs.writeFileSync(testFile, testCode, 'utf-8');
+
+      const cfg = getConfig();
+      const configFile = path.join(__dirname, `playwright_run_${testId}.config.js`);
+      const configContent = `
 const { defineConfig } = require('@playwright/test');
 module.exports = defineConfig({
   reporter: [['html', { outputFolder: '${reportDir.replace(/\\/g, '/')}', open: 'never' }]],
@@ -494,59 +1158,53 @@ module.exports = defineConfig({
   },
 });
 `;
-    fs.writeFileSync(configFile, configContent, 'utf-8');
+      fs.writeFileSync(configFile, configContent, 'utf-8');
 
-    // Reset runner state
-    runnerState = 'running';
-    runnerTestId = testId;
-    runnerOutput = '';
-    runnerReportPath = `/reports/test-${testId}/index.html`;
+      console.log(`▶️  Running web test #${testId}: "${tc.name}"`);
 
-    console.log(`▶️  Running test #${testId}: "${tc.name}"`);
+      const args = ['playwright', 'test', testFile, `--config=${configFile}`];
+      runnerProcess = spawn('npx', args, {
+        cwd: __dirname,
+        stdio: 'pipe',
+        shell: true,
+      });
 
-    const args = ['playwright', 'test', testFile, `--config=${configFile}`];
-    runnerProcess = spawn('npx', args, {
-      cwd: __dirname,
-      stdio: 'pipe',
-      shell: true,
-    });
+      runnerProcess.stdout.on('data', (data) => {
+        const text = data.toString();
+        runnerOutput += text;
+        console.log(`[test stdout] ${text.trim()}`);
+      });
 
-    runnerProcess.stdout.on('data', (data) => {
-      const text = data.toString();
-      runnerOutput += text;
-      console.log(`[test stdout] ${text.trim()}`);
-    });
+      runnerProcess.stderr.on('data', (data) => {
+        const text = data.toString();
+        runnerOutput += text;
+        console.log(`[test stderr] ${text.trim()}`);
+      });
 
-    runnerProcess.stderr.on('data', (data) => {
-      const text = data.toString();
-      runnerOutput += text;
-      console.log(`[test stderr] ${text.trim()}`);
-    });
+      runnerProcess.on('error', (err) => {
+        console.error('❌ Test runner error:', err.message);
+        runnerState = 'error';
+        runnerOutput += `\nError: ${err.message}`;
+        runnerProcess = null;
+      });
 
-    runnerProcess.on('error', (err) => {
-      console.error('❌ Test runner error:', err.message);
-      runnerState = 'error';
-      runnerOutput += `\nError: ${err.message}`;
-      runnerProcess = null;
-    });
+      runnerProcess.on('close', (code) => {
+        console.log(`🏁 Test #${testId} finished with exit code ${code}`);
+        runnerState = 'completed';
+        runnerProcess = null;
 
-    runnerProcess.on('close', (code) => {
-      console.log(`🏁 Test #${testId} finished with exit code ${code}`);
-      // Playwright test returns exit code 1 for test failures, which is still a valid result
-      runnerState = 'completed';
-      runnerProcess = null;
+        try { fs.unlinkSync(testFile); } catch (_) {}
+        try { fs.unlinkSync(configFile); } catch (_) {}
+      });
 
-      // Clean up temporary spec and config files
-      try { fs.unlinkSync(testFile); } catch (_) { }
-      try { fs.unlinkSync(configFile); } catch (_) { }
-    });
-
-    return res.json({
-      success: true,
-      message: `Test "${tc.name}" is now running...`,
-    });
+      return res.json({
+        success: true,
+        message: `Test "${tc.name}" is now running...`,
+      });
+    }
   } catch (err) {
     console.error('❌ Failed to run test:', err.message);
+    runnerState = 'idle';
     return res.status(500).json({ success: false, message: err.message });
   }
 });
@@ -584,20 +1242,16 @@ function convertToPlaywrightTest(code, testName) {
     code = code.replace(/^\s*\/\/\s*(await\s+expect\(.*)/gm, '  $1');
   }
 
-  // If code already has test( or test.describe, it's already in test format
   if (code.includes("test(") || code.includes("test.describe(")) {
     return code;
   }
 
-  // Strategy: extract only the meaningful action lines (await page.*, comments, expects)
-  // and wrap them in a proper Playwright Test block
   const lines = code.split('\n');
   const bodyLines = [];
 
   for (const line of lines) {
     const trimmed = line.trim();
 
-    // Keep lines that are actual test actions
     const isPageAction = trimmed.startsWith('await page.');
     const isExpect = trimmed.startsWith('await expect(') || trimmed.startsWith('expect(');
     const isComment = trimmed.startsWith('//');
@@ -606,21 +1260,18 @@ function convertToPlaywrightTest(code, testName) {
     if (isPageAction || isExpect) {
       bodyLines.push(`  ${trimmed}`);
     } else if (isComment && bodyLines.length > 0) {
-      // Keep comments that appear after the first action (contextual comments)
       bodyLines.push(`  ${trimmed}`);
     } else if (isEmptyLine && bodyLines.length > 0) {
       bodyLines.push('');
     }
   }
 
-  // Remove trailing empty lines
   while (bodyLines.length > 0 && bodyLines[bodyLines.length - 1].trim() === '') {
     bodyLines.pop();
   }
 
   const safeName = testName.replace(/'/g, "\\'");
   let body = bodyLines.join('\n');
-  // Replace full target URL in goto with relative path '/' to use baseURL from config
   body = body.replace(/goto\(['"]https?:\/\/[^'"]+['"]\)/g, "goto('/')");
 
   return `const { test, expect } = require('@playwright/test');
@@ -629,6 +1280,128 @@ test('${safeName}', async ({ page }) => {
 ${body}
 });
 `;
+}
+
+// ─── Helper: Convert mobile code to WDIO test format ─────────────────────────
+function convertToWdioTest(code, testName, platform, appId) {
+  const safeName = testName.replace(/'/g, "\\'");
+
+  // Extract action lines (lines starting with await)
+  const lines = code.split('\n');
+  const bodyLines = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('await ') || trimmed.startsWith('expect(') || trimmed.startsWith('await expect(')) {
+      bodyLines.push(`    ${trimmed}`);
+    } else if (trimmed.startsWith('//') && bodyLines.length > 0) {
+      bodyLines.push(`    ${trimmed}`);
+    }
+  }
+
+  return `describe('${safeName}', () => {
+  it('should execute mobile test', async () => {
+    // Activate the app
+    await driver.activateApp('${appId || 'com.ismailaslan.flutterloginapp'}');
+    await driver.pause(2000);
+
+${bodyLines.join('\n')}
+  });
+});
+`;
+}
+
+// ─── Helper: Generate WDIO config for test execution ─────────────────────────
+function generateWdioConfig(testFile, platform, appId, reportDir) {
+  const isAndroid = platform === 'android';
+  let capabilities;
+
+  if (isAndroid) {
+    capabilities = `{
+      platformName: 'Android',
+      'appium:automationName': 'UiAutomator2',
+      'appium:appPackage': '${appId || 'com.ismailaslan.flutterloginapp'}',
+      'appium:appActivity': '.MainActivity',
+      'appium:noReset': true,
+      'appium:newCommandTimeout': 300,
+    }`;
+  } else {
+    const udid = getBootedSimulatorUDID();
+    capabilities = `{
+      platformName: 'iOS',
+      'appium:automationName': 'XCUITest',
+      'appium:bundleId': '${appId || 'com.ismailaslan.flutterloginapp'}',
+      'appium:noReset': true,
+      'appium:newCommandTimeout': 300,
+      ${udid !== 'booted' ? `'appium:udid': '${udid}',` : ''}
+    }`;
+  }
+
+  return `exports.config = {
+  runner: 'local',
+  hostname: '127.0.0.1',
+  port: 4723,
+  path: '/',
+  specs: ['./' + path.basename(testFile)],
+  maxInstances: 1,
+  capabilities: [${capabilities}],
+  framework: 'mocha',
+  mochaOpts: {
+    ui: 'bdd',
+    timeout: 120000,
+  },
+  reporters: ['spec'],
+  logLevel: 'warn',
+  waitforTimeout: 10000,
+  connectionRetryTimeout: 60000,
+  connectionRetryCount: 3,
+};
+`;
+}
+
+// ─── Helper: Generate mobile HTML report ─────────────────────────────────────
+function generateMobileReport(reportDir, tc, output, exitCode) {
+  const passed = exitCode === 0;
+  const statusBadge = passed ? '<span style="background:#10b981;color:#fff;padding:4px 12px;border-radius:99px;font-weight:bold;font-size:14px;">PASSED</span>' : '<span style="background:#ef4444;color:#fff;padding:4px 12px;border-radius:99px;font-weight:bold;font-size:14px;">FAILED</span>';
+  const steps = Array.isArray(tc.steps) ? tc.steps : [];
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Mobile Test Report - ${escapeHtml(tc.name)}</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 40px; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 24px; max-width: 900px; margin: 0 auto; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5); }
+    .step { background: #0f172a; border-left: 4px solid ${passed ? '#38bdf8' : '#ef4444'}; padding: 12px 16px; margin: 12px 0; border-radius: 0 8px 8px 0; font-family: monospace; font-size: 13px; }
+    pre { background: #0f172a; padding: 16px; border-radius: 8px; overflow-x: auto; font-size: 12px; line-height: 1.5; border: 1px solid #334155; }
+    h1 { margin: 0; font-size: 24px; }
+    h3 { color: #94a3b8; margin-top: 24px; }
+    hr { border: 0; border-top: 1px solid #334155; margin: 20px 0; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+      <h1>📱 ${(tc.platform || 'Mobile').toUpperCase()} Test Report</h1>
+      ${statusBadge}
+    </div>
+    <p style="color: #94a3b8;">Test: <strong>${escapeHtml(tc.name)}</strong> | App: <strong>${escapeHtml(tc.app_id || tc.url || 'N/A')}</strong> | Engine: <strong>Appium + WebdriverIO</strong></p>
+    <hr>
+    <h3>Test Steps:</h3>
+    ${steps.map(s => `<div class="step">${passed ? '✅' : '❌'} Step ${s.step}: ${escapeHtml(s.description)}</div>`).join('') || '<div class="step">No steps recorded.</div>'}
+    <h3>Console Output:</h3>
+    <pre>${escapeHtml(output || 'No output captured.')}</pre>
+    <p style="margin-top: 24px; font-size: 12px; color: #64748b; text-align: center;">Generated by Playwright Codegen Studio (Appium + WebdriverIO)</p>
+  </div>
+</body>
+</html>`;
+
+  fs.writeFileSync(path.join(reportDir, 'index.html'), html, 'utf-8');
+}
+
+function escapeHtml(text) {
+  if (!text) return '';
+  return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 // ─── Start Server ────────────────────────────────────────────────────────────
