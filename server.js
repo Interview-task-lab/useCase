@@ -1190,7 +1190,7 @@ app.post('/api/test-cases/:id/run', async (req, res) => {
         try {
           const udid = getBootedSimulatorUDID();
           if (udid && udid !== 'booted') {
-            extraArgs = ['--device-id', udid];
+            extraArgs = ['--device', udid];
             console.log(`📱 Targeting iOS Simulator UDID: ${udid}`);
           }
         } catch (_) {}
