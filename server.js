@@ -1201,6 +1201,7 @@ app.post('/api/test-cases/:id/run', async (req, res) => {
         cwd: __dirname,
         stdio: 'pipe',
         shell: true,
+        env: { ...process.env, MAESTRO_DRIVER_STARTUP_TIMEOUT: '300000' }
       });
     } else {
       // Write test file to project root so @playwright/test resolves from node_modules
