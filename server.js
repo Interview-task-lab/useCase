@@ -539,137 +539,84 @@ app.post('/api/mobile/tap', (req, res) => {
   const platform = lastRecordingPlatform;
   const adb = getAdbBinary();
   try {
-    // iOS simulator tap via osascript (xcrun simctl io has no tap command)
+    // iOS simulator tap via osascript + Maestro hierarchy for element detection
     if (platform === 'ios') {
       try {
-        const osModule = require('os');
-        const ts = Date.now();
+        const home = process.env.HOME || process.env.USERPROFILE || '';
+        const maestroBin = fs.existsSync(path.join(home, '.maestro', 'bin', 'maestro'))
+          ? path.join(home, '.maestro', 'bin', 'maestro') : 'maestro';
 
-        // Step 1: Find the actual screen content group within the Simulator window
-        // The Simulator window includes device chrome (bezels). We find the largest group
-        // which represents the actual iOS screen content area.
-        const contentBoundsScript = `tell application "Simulator" to activate
-delay 0.4
-tell application "System Events"
-  repeat 5 times
-    try
-      tell process "Simulator"
-        tell front window
-          set grps to every group
-          repeat with g in grps
-            set {gx, gy} to position of g
-            set {gw, gh} to size of g
-            if gw > 200 and gh > 500 then
-              return (gx as string) & "," & (gy as string) & "," & (gw as string) & "," & (gh as string)
-            end if
-          end repeat
-        end tell
-      end tell
-    on error
-      delay 0.3
-    end try
-  end repeat
-end tell
-return "ERROR"`;
-        const contentFile = path.join(osModule.tmpdir(), `sim_content_${ts}.applescript`);
-        fs.writeFileSync(contentFile, contentBoundsScript, 'utf-8');
-        const contentInfo = require('child_process').execSync(`osascript "${contentFile}"`, { encoding: 'utf-8' }).trim();
-        try { fs.unlinkSync(contentFile); } catch (_) {}
+        const udid = getBootedSimulatorUDID();
+        const deviceArg = udid && udid !== 'booted' ? ` --device ${udid}` : '';
 
-        if (contentInfo.startsWith('ERROR')) {
-          return res.status(500).json({ success: false, message: 'iOS tap failed: Could not detect Simulator screen content area.' });
+        // Step 1: Get Maestro hierarchy to find Flutter element IDs and bounds
+        let iosElementId = '';
+        let iosElementText = '';
+        try {
+          const hierarchyJson = require('child_process').execSync(`${maestroBin}${deviceArg} hierarchy`, {
+            encoding: 'utf-8', timeout: 8000, stdio: 'pipe'
+          });
+          const hierarchy = JSON.parse(hierarchyJson);
+          // iPhone 15 logical resolution (from Maestro bounds)
+          const simW = 390, simH = 844;
+          const tapXLogical = Math.round(normX * simW);
+          const tapYLogical = Math.round(normY * simH);
+
+          // Flatten all nodes and find the smallest one containing the tap point
+          const allNodes = [];
+          function collectNodes(node) {
+            const attrs = node.attributes || {};
+            const boundsStr = attrs.bounds || '';
+            const m = boundsStr.match(/\[(\d+),(\d+)\]\[(\d+),(\d+)\]/);
+            if (m) {
+              const left = parseInt(m[1]), top = parseInt(m[2]);
+              const right = parseInt(m[3]), bottom = parseInt(m[4]);
+              const area = (right - left) * (bottom - top);
+              if (tapXLogical >= left && tapXLogical <= right && tapYLogical >= top && tapYLogical <= bottom && area > 0) {
+                allNodes.push({ id: attrs['resource-id'] || '', text: attrs['text'] || '', acc: attrs['accessibilityText'] || '', left, top, right, bottom, area });
+              }
+            }
+            (node.children || []).forEach(collectNodes);
+          }
+          collectNodes(hierarchy);
+          allNodes.sort((a, b) => a.area - b.area);
+          for (const node of allNodes) {
+            if (node.id && !['login-scaffold'].includes(node.id)) { iosElementId = node.id; break; }
+            if (node.text && node.text.trim()) { iosElementText = node.text.trim(); break; }
+            if (node.acc && node.acc.trim()) { iosElementText = node.acc.trim(); break; }
+          }
+        } catch (hierarchyErr) {
+          console.log('[iOS] Maestro hierarchy failed:', hierarchyErr.message);
         }
 
-        const cparts = contentInfo.split(',').map(s => parseInt(s.trim(), 10));
-        const [cx, cy, cw, ch] = cparts;
-
-        // Step 2: Map normalized position to exact screen pixel coordinate (content area only)
-        const screenX = Math.round(cx + normX * cw);
-        const screenY = Math.round(cy + normY * ch);
-
-        // Step 3: Before clicking, try to find an accessible element at this coordinate
-        // by scanning System Events children with matching bounds
-        let elementLabel = '';
-        let elementRole = '';
-        try {
-          const elemScript = `tell application "Simulator" to activate
-delay 0.1
-tell application "System Events"
-  tell process "Simulator"
-    tell front window
-      set allElems to every UI element
-      repeat with e1 in allElems
-        try
-          set L2 to every UI element of e1
-          repeat with e2 in L2
-            try
-              set {ex2, ey2} to position of e2
-              set {ew2, eh2} to size of e2
-              if ${screenX} >= ex2 and ${screenX} <= (ex2 + ew2) and ${screenY} >= ey2 and ${screenY} <= (ey2 + eh2) then
-                set t to ""
-                try
-                  set t to value of e2 as string
-                  if t is "missing value" then set t to ""
-                end try
-                set d to ""
-                try
-                  set d to description of e2 as string
-                  if d is "missing value" then set d to ""
-                end try
-                if t is not "" or d is not "" then
-                  return (role of e2 as string) & "|" & t & "|" & d
-                end if
-              end if
-            end try
-          end repeat
-        end try
-      end repeat
-    end tell
-  end tell
-end tell
-return ""`;
-          const elemFile = path.join(osModule.tmpdir(), `sim_elem_${ts}.applescript`);
-          fs.writeFileSync(elemFile, elemScript, 'utf-8');
-          const elemResult = require('child_process').execSync(`osascript "${elemFile}"`, { encoding: 'utf-8' }).trim();
-          try { fs.unlinkSync(elemFile); } catch (_) {}
-          if (elemResult) {
-            const [role, val, desc] = elemResult.split('|');
-            elementRole = role || '';
-            elementLabel = (val && val !== 'missing value' && val.trim()) ? val.trim()
-              : (desc && desc !== 'missing value' && desc !== 'group' && desc.trim()) ? desc.trim() : '';
-          }
-        } catch (_) {}
-
-        // Step 4: Perform the actual click
-        const clickScript = `tell application "Simulator" to activate
-delay 0.1
-tell application "System Events"
-  repeat 3 times
-    try
-      click at {${screenX}, ${screenY}}
-      return "OK"
-    on error
-      delay 0.2
-    end try
-  end repeat
-end tell
-return "FAIL"`;
-        const clickFile = path.join(osModule.tmpdir(), `sim_click_${ts}.applescript`);
-        fs.writeFileSync(clickFile, clickScript, 'utf-8');
-        require('child_process').execSync(`osascript "${clickFile}"`, { stdio: 'ignore' });
-        try { fs.unlinkSync(clickFile); } catch (_) {}
-
-        // Step 5: Build YAML step — prefer text/label locator, fallback to point
-        const simW = 390, simH = 844; // iPhone 15 logical resolution
+        // Step 2: Build YAML step — prefer Maestro element ID, then text, then fallback to point
+        const simW = 390, simH = 844;
         const tapX = Math.round(normX * simW);
         const tapY = Math.round(normY * simH);
 
         let stepYaml;
-        if (elementLabel && elementLabel.length > 0 && elementLabel.length < 50) {
-          // Use text locator for Maestro
-          stepYaml = `- tapOn: "${elementLabel}"`;
+        if (iosElementId) {
+          stepYaml = `- tapOn:\n    id: "${iosElementId}"`;
+        } else if (iosElementText && iosElementText.length < 50) {
+          stepYaml = `- tapOn: "${iosElementText}"`;
         } else {
           stepYaml = `- tapOn:\n    point: "${tapX},${tapY}"`;
+        }
+
+        // Step 3: Run this single step on the iOS Simulator in the background using Maestro CLI
+        const appName = lastRecordingUrl || 'com.ismailaslan.flutterloginapp';
+        const tempStepFile = path.join(TEMP_DIR, `temp_tap_${Date.now()}.yaml`);
+        const tempStepYaml = `appId: ${appName}
+---
+${stepYaml}`;
+        fs.writeFileSync(tempStepFile, tempStepYaml, 'utf-8');
+
+        try {
+          require('child_process').execSync(`${maestroBin}${deviceArg} test ${tempStepFile}`, { stdio: 'ignore', timeout: 15000 });
+        } catch (testErr) {
+          console.log('[iOS] Maestro single tap execution failed/timed out:', testErr.message);
+        } finally {
+          try { fs.unlinkSync(tempStepFile); } catch (_) {}
         }
 
         const outFile = getOutputFile();
@@ -781,9 +728,32 @@ app.post('/api/mobile/input-text', (req, res) => {
   const adb = getAdbBinary();
   try {
     if (platform === 'ios') {
-      // xcrun simctl keyboard type doesn't exist; use osascript or ADB isn't available
-      // We still write the YAML step; real input will happen via Maestro at run time
-      console.log(`[iOS] inputText: "${text}" will be performed by Maestro at runtime.`);
+      // Type text into the Simulator in background via Maestro
+      try {
+        const home = process.env.HOME || process.env.USERPROFILE || '';
+        const maestroBin = fs.existsSync(path.join(home, '.maestro', 'bin', 'maestro'))
+          ? path.join(home, '.maestro', 'bin', 'maestro') : 'maestro';
+
+        const udid = getBootedSimulatorUDID();
+        const deviceArg = udid && udid !== 'booted' ? ` --device ${udid}` : '';
+        const appName = lastRecordingUrl || 'com.ismailaslan.flutterloginapp';
+
+        const tempStepFile = path.join(TEMP_DIR, `temp_input_${Date.now()}.yaml`);
+        const tempStepYaml = `appId: ${appName}
+---
+- inputText: "${(text || '').replace(/"/g, '\\"')}"`;
+        fs.writeFileSync(tempStepFile, tempStepYaml, 'utf-8');
+
+        try {
+          require('child_process').execSync(`${maestroBin}${deviceArg} test ${tempStepFile}`, { stdio: 'ignore', timeout: 15000 });
+        } catch (testErr) {
+          console.log('[iOS] Maestro single input step execution failed/timed out:', testErr.message);
+        } finally {
+          try { fs.unlinkSync(tempStepFile); } catch (_) {}
+        }
+      } catch (typeErr) {
+        console.error('[iOS] input-text failed:', typeErr.message);
+      }
     } else {
       require('child_process').execSync(`${adb} shell input text "${(text || '').replace(/"/g, '\\"')}"`, { stdio: 'ignore' });
     }
@@ -806,7 +776,34 @@ app.post('/api/mobile/key', (req, res) => {
   try {
     const keyMap = { 'ENTER': 66, 'BACK': 4, 'HOME': 3, 'TAB': 61, 'DELETE': 67 };
     const keyCode = keyMap[key.toUpperCase()] || 66;
-    if (platform !== 'ios') {
+    if (platform === 'ios') {
+      try {
+        const home = process.env.HOME || process.env.USERPROFILE || '';
+        const maestroBin = fs.existsSync(path.join(home, '.maestro', 'bin', 'maestro'))
+          ? path.join(home, '.maestro', 'bin', 'maestro') : 'maestro';
+
+        const udid = getBootedSimulatorUDID();
+        const deviceArg = udid && udid !== 'booted' ? ` --device ${udid}` : '';
+        const appName = lastRecordingUrl || 'com.ismailaslan.flutterloginapp';
+        
+        const keyName = key.charAt(0).toUpperCase() + key.slice(1).toLowerCase();
+        const tempStepFile = path.join(TEMP_DIR, `temp_key_${Date.now()}.yaml`);
+        const tempStepYaml = `appId: ${appName}
+---
+- pressKey: ${keyName}`;
+        fs.writeFileSync(tempStepFile, tempStepYaml, 'utf-8');
+
+        try {
+          require('child_process').execSync(`${maestroBin}${deviceArg} test ${tempStepFile}`, { stdio: 'ignore', timeout: 15000 });
+        } catch (testErr) {
+          console.log('[iOS] Maestro single key step execution failed/timed out:', testErr.message);
+        } finally {
+          try { fs.unlinkSync(tempStepFile); } catch (_) {}
+        }
+      } catch (keyErr) {
+        console.error('[iOS] keypress failed:', keyErr.message);
+      }
+    } else {
       require('child_process').execSync(`${adb} shell input keyevent ${keyCode}`, { stdio: 'ignore' });
     }
     const stepYaml = `- pressKey: ${key.charAt(0).toUpperCase() + key.slice(1).toLowerCase()}`;
