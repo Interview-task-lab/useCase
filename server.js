@@ -716,7 +716,11 @@ ${stepYaml}`;
         fs.writeFileSync(tempStepFile, tempStepYaml, 'utf-8');
 
         try {
-          require('child_process').execSync(`${maestroBin}${deviceArg} test ${tempStepFile}`, { stdio: 'ignore', timeout: 15000 });
+          require('child_process').execSync(`${maestroBin}${deviceArg} test ${tempStepFile}`, {
+            stdio: 'ignore',
+            timeout: 45000,
+            env: { ...process.env, MAESTRO_DRIVER_STARTUP_TIMEOUT: '300000' }
+          });
         } catch (testErr) {
           console.log('[iOS] Maestro single tap execution failed/timed out:', testErr.message);
         } finally {
@@ -845,7 +849,11 @@ app.post('/api/mobile/input-text', (req, res) => {
         fs.writeFileSync(tempStepFile, tempStepYaml, 'utf-8');
 
         try {
-          require('child_process').execSync(`${maestroBin}${deviceArg} test ${tempStepFile}`, { stdio: 'ignore', timeout: 15000 });
+          require('child_process').execSync(`${maestroBin}${deviceArg} test ${tempStepFile}`, {
+            stdio: 'ignore',
+            timeout: 45000,
+            env: { ...process.env, MAESTRO_DRIVER_STARTUP_TIMEOUT: '300000' }
+          });
         } catch (testErr) {
           console.log('[iOS] Maestro single input step execution failed/timed out:', testErr.message);
         } finally {
@@ -898,7 +906,11 @@ app.post('/api/mobile/key', (req, res) => {
         fs.writeFileSync(tempStepFile, tempStepYaml, 'utf-8');
 
         try {
-          require('child_process').execSync(`${maestroBin}${deviceArg} test ${tempStepFile}`, { stdio: 'ignore', timeout: 15000 });
+          require('child_process').execSync(`${maestroBin}${deviceArg} test ${tempStepFile}`, {
+            stdio: 'ignore',
+            timeout: 45000,
+            env: { ...process.env, MAESTRO_DRIVER_STARTUP_TIMEOUT: '300000' }
+          });
         } catch (testErr) {
           console.log('[iOS] Maestro single key step execution failed/timed out:', testErr.message);
         } finally {
