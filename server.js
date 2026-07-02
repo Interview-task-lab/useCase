@@ -820,8 +820,78 @@ app.post('/api/mobile/key', (req, res) => {
 
 app.post('/api/mobile/assert-screen', (req, res) => {
   const { normX, normY } = req.body;
+  const platform = lastRecordingPlatform;
   const adb = getAdbBinary();
   try {
+    if (platform === 'ios') {
+      try {
+        const home = process.env.HOME || process.env.USERPROFILE || '';
+        const maestroBin = fs.existsSync(path.join(home, '.maestro', 'bin', 'maestro'))
+          ? path.join(home, '.maestro', 'bin', 'maestro') : 'maestro';
+
+        const udid = getBootedSimulatorUDID();
+        const deviceArg = udid && udid !== 'booted' ? ` --device ${udid}` : '';
+
+        // Get Maestro hierarchy to find Flutter element IDs and bounds
+        let iosElementId = '';
+        let iosElementText = '';
+        try {
+          const hierarchyJson = require('child_process').execSync(`${maestroBin}${deviceArg} hierarchy`, {
+            encoding: 'utf-8', timeout: 8000, stdio: 'pipe'
+          });
+          const hierarchy = JSON.parse(hierarchyJson);
+          // iPhone 15 logical resolution (from Maestro bounds)
+          const simW = 390, simH = 844;
+          const tapXLogical = Math.round(normX * simW);
+          const tapYLogical = Math.round(normY * simH);
+
+          // Flatten all nodes and find the smallest one containing the tap point
+          const allNodes = [];
+          function collectNodes(node) {
+            const attrs = node.attributes || {};
+            const boundsStr = attrs.bounds || '';
+            const m = boundsStr.match(/\[(\d+),(\d+)\]\[(\d+),(\d+)\]/);
+            if (m) {
+              const left = parseInt(m[1]), top = parseInt(m[2]);
+              const right = parseInt(m[3]), bottom = parseInt(m[4]);
+              const area = (right - left) * (bottom - top);
+              if (tapXLogical >= left && tapXLogical <= right && tapYLogical >= top && tapYLogical <= bottom && area > 0) {
+                allNodes.push({ id: attrs['resource-id'] || '', text: attrs['text'] || '', acc: attrs['accessibilityText'] || '', left, top, right, bottom, area });
+              }
+            }
+            (node.children || []).forEach(collectNodes);
+          }
+          collectNodes(hierarchy);
+          allNodes.sort((a, b) => a.area - b.area);
+          for (const node of allNodes) {
+            if (node.id && !['login-scaffold'].includes(node.id)) { iosElementId = node.id; break; }
+            if (node.text && node.text.trim()) { iosElementText = node.text.trim(); break; }
+            if (node.acc && node.acc.trim()) { iosElementText = node.acc.trim(); break; }
+          }
+        } catch (hierarchyErr) {
+          console.log('[iOS] Maestro hierarchy failed:', hierarchyErr.message);
+        }
+
+        let stepYaml = '';
+        if (iosElementId) {
+          stepYaml = `- assertVisible:\n    id: "${iosElementId}"`;
+        } else if (iosElementText && iosElementText.length < 50) {
+          stepYaml = `- assertVisible: "${iosElementText}"`;
+        } else {
+          return res.status(404).json({ success: false, message: 'No UI element found at clicked coordinate to assert on iOS.' });
+        }
+
+        const outFile = getOutputFile();
+        let currentCode = fs.existsSync(outFile) ? fs.readFileSync(outFile, 'utf-8') : '';
+        currentCode = currentCode.trimEnd() + '\n' + stepYaml + '\n';
+        fs.writeFileSync(outFile, currentCode, 'utf-8');
+        const steps = parseCodeToSteps(currentCode, 'yaml');
+        return res.json({ success: true, step: stepYaml, data: { code: currentCode, steps, language: 'yaml' } });
+      } catch (iosErr) {
+        return res.status(500).json({ success: false, message: 'iOS assertion failed: ' + iosErr.message });
+      }
+    }
+
     let devW = 1080, devH = 2400;
     try {
       const sizeStr = require('child_process').execSync(`${adb} shell wm size`, { encoding: 'utf-8' });
