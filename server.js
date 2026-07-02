@@ -539,24 +539,31 @@ app.post('/api/mobile/tap', (req, res) => {
   const platform = lastRecordingPlatform;
   const adb = getAdbBinary();
   try {
-    // iOS simulator tap via osascript temp file (xcrun simctl has no tap command)
+    // iOS simulator tap via osascript (xcrun simctl io has no tap command)
     if (platform === 'ios') {
       try {
-        const os = require('os');
+        const osModule = require('os');
         const ts = Date.now();
-        const infoScriptFile = path.join(os.tmpdir(), `sim_info_${ts}.applescript`);
-        const infoScriptContent = `tell application "Simulator"
-  activate
-end tell
-delay 0.5
+
+        // Step 1: Find the actual screen content group within the Simulator window
+        // The Simulator window includes device chrome (bezels). We find the largest group
+        // which represents the actual iOS screen content area.
+        const contentBoundsScript = `tell application "Simulator" to activate
+delay 0.4
 tell application "System Events"
   repeat 5 times
     try
       tell process "Simulator"
-        set simWindow to front window
-        set {wx, wy} to position of simWindow
-        set {ww, wh} to size of simWindow
-        return (wx as string) & "," & (wy as string) & "," & (ww as string) & "," & (wh as string)
+        tell front window
+          set grps to every group
+          repeat with g in grps
+            set {gx, gy} to position of g
+            set {gw, gh} to size of g
+            if gw > 200 and gh > 500 then
+              return (gx as string) & "," & (gy as string) & "," & (gw as string) & "," & (gh as string)
+            end if
+          end repeat
+        end tell
       end tell
     on error
       delay 0.3
@@ -564,26 +571,78 @@ tell application "System Events"
   end repeat
 end tell
 return "ERROR"`;
-        fs.writeFileSync(infoScriptFile, infoScriptContent, 'utf-8');
-        const winInfo = require('child_process').execSync(`osascript "${infoScriptFile}"`, { encoding: 'utf-8' }).trim();
-        try { fs.unlinkSync(infoScriptFile); } catch (_) {}
+        const contentFile = path.join(osModule.tmpdir(), `sim_content_${ts}.applescript`);
+        fs.writeFileSync(contentFile, contentBoundsScript, 'utf-8');
+        const contentInfo = require('child_process').execSync(`osascript "${contentFile}"`, { encoding: 'utf-8' }).trim();
+        try { fs.unlinkSync(contentFile); } catch (_) {}
 
-        if (winInfo.startsWith('ERROR')) {
-          return res.status(500).json({ success: false, message: 'iOS tap failed: Could not access Simulator window. Make sure Simulator is open and in the foreground.' });
+        if (contentInfo.startsWith('ERROR')) {
+          return res.status(500).json({ success: false, message: 'iOS tap failed: Could not detect Simulator screen content area.' });
         }
 
-        const parts = winInfo.split(',').map(s => parseInt(s.trim(), 10));
-        const [wx, wy, ww, wh] = parts;
+        const cparts = contentInfo.split(',').map(s => parseInt(s.trim(), 10));
+        const [cx, cy, cw, ch] = cparts;
 
-        // Map normalized position to actual screen pixel coordinate
-        const screenX = Math.round(wx + normX * ww);
-        const screenY = Math.round(wy + normY * wh);
+        // Step 2: Map normalized position to exact screen pixel coordinate (content area only)
+        const screenX = Math.round(cx + normX * cw);
+        const screenY = Math.round(cy + normY * ch);
 
-        const clickScriptFile = path.join(os.tmpdir(), `sim_click_${ts}.applescript`);
-        const clickScriptContent = `tell application "Simulator"
-  activate
+        // Step 3: Before clicking, try to find an accessible element at this coordinate
+        // by scanning System Events children with matching bounds
+        let elementLabel = '';
+        let elementRole = '';
+        try {
+          const elemScript = `tell application "Simulator" to activate
+delay 0.1
+tell application "System Events"
+  tell process "Simulator"
+    tell front window
+      set allElems to every UI element
+      repeat with e1 in allElems
+        try
+          set L2 to every UI element of e1
+          repeat with e2 in L2
+            try
+              set {ex2, ey2} to position of e2
+              set {ew2, eh2} to size of e2
+              if ${screenX} >= ex2 and ${screenX} <= (ex2 + ew2) and ${screenY} >= ey2 and ${screenY} <= (ey2 + eh2) then
+                set t to ""
+                try
+                  set t to value of e2 as string
+                  if t is "missing value" then set t to ""
+                end try
+                set d to ""
+                try
+                  set d to description of e2 as string
+                  if d is "missing value" then set d to ""
+                end try
+                if t is not "" or d is not "" then
+                  return (role of e2 as string) & "|" & t & "|" & d
+                end if
+              end if
+            end try
+          end repeat
+        end try
+      end repeat
+    end tell
+  end tell
 end tell
-delay 0.2
+return ""`;
+          const elemFile = path.join(osModule.tmpdir(), `sim_elem_${ts}.applescript`);
+          fs.writeFileSync(elemFile, elemScript, 'utf-8');
+          const elemResult = require('child_process').execSync(`osascript "${elemFile}"`, { encoding: 'utf-8' }).trim();
+          try { fs.unlinkSync(elemFile); } catch (_) {}
+          if (elemResult) {
+            const [role, val, desc] = elemResult.split('|');
+            elementRole = role || '';
+            elementLabel = (val && val !== 'missing value' && val.trim()) ? val.trim()
+              : (desc && desc !== 'missing value' && desc !== 'group' && desc.trim()) ? desc.trim() : '';
+          }
+        } catch (_) {}
+
+        // Step 4: Perform the actual click
+        const clickScript = `tell application "Simulator" to activate
+delay 0.1
 tell application "System Events"
   repeat 3 times
     try
@@ -595,15 +654,24 @@ tell application "System Events"
   end repeat
 end tell
 return "FAIL"`;
-        fs.writeFileSync(clickScriptFile, clickScriptContent, 'utf-8');
-        require('child_process').execSync(`osascript "${clickScriptFile}"`, { stdio: 'ignore' });
-        try { fs.unlinkSync(clickScriptFile); } catch (_) {}
+        const clickFile = path.join(osModule.tmpdir(), `sim_click_${ts}.applescript`);
+        fs.writeFileSync(clickFile, clickScript, 'utf-8');
+        require('child_process').execSync(`osascript "${clickFile}"`, { stdio: 'ignore' });
+        try { fs.unlinkSync(clickFile); } catch (_) {}
 
-        // Record step using iPhone 15 logical resolution
-        const simW = 390, simH = 844;
+        // Step 5: Build YAML step — prefer text/label locator, fallback to point
+        const simW = 390, simH = 844; // iPhone 15 logical resolution
         const tapX = Math.round(normX * simW);
         const tapY = Math.round(normY * simH);
-        const stepYaml = `- tapOn:\n    point: "${tapX},${tapY}"`;
+
+        let stepYaml;
+        if (elementLabel && elementLabel.length > 0 && elementLabel.length < 50) {
+          // Use text locator for Maestro
+          stepYaml = `- tapOn: "${elementLabel}"`;
+        } else {
+          stepYaml = `- tapOn:\n    point: "${tapX},${tapY}"`;
+        }
+
         const outFile = getOutputFile();
         let currentCode = fs.existsSync(outFile) ? fs.readFileSync(outFile, 'utf-8') : '';
         currentCode = currentCode.trimEnd() + '\n' + stepYaml + '\n';
