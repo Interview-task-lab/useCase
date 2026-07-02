@@ -337,6 +337,9 @@ app.post('/api/record/start', (req, res) => {
     processExited = true;
     processExitCode = 0;
 
+    clearHierarchyCache();
+    triggerBackgroundHierarchyUpdate(targetPlatform, 100);
+
     return res.json({
       success: true,
       mode: 'mobile-live',
@@ -513,6 +516,108 @@ function getBootedSimulatorUDID() {
   return 'booted';
 }
 
+// ─── Hierarchy Caching for Performance ───────────────────────────────────────
+let cachedHierarchy = null;
+let cachedHierarchyPlatform = null;
+let activeHierarchyFetchPromise = null;
+
+let cachedAndroidDeviceWidth = null;
+let cachedAndroidDeviceHeight = null;
+
+function clearHierarchyCache() {
+  cachedHierarchy = null;
+  cachedHierarchyPlatform = null;
+  activeHierarchyFetchPromise = null;
+  cachedAndroidDeviceWidth = null;
+  cachedAndroidDeviceHeight = null;
+  console.log('[Cache] Hierarchy cache cleared.');
+}
+
+async function updateHierarchyCache(platform) {
+  cachedHierarchyPlatform = platform;
+  const start = Date.now();
+  console.log(`[Cache] Updating hierarchy cache for ${platform.toUpperCase()}...`);
+  if (platform === 'ios') {
+    try {
+      const home = process.env.HOME || process.env.USERPROFILE || '';
+      const maestroBin = fs.existsSync(path.join(home, '.maestro', 'bin', 'maestro'))
+        ? path.join(home, '.maestro', 'bin', 'maestro') : 'maestro';
+      const udid = getBootedSimulatorUDID();
+      const deviceArg = udid && udid !== 'booted' ? ` --device ${udid}` : '';
+      
+      const hierarchyJson = require('child_process').execSync(`${maestroBin}${deviceArg} hierarchy`, {
+        encoding: 'utf-8', timeout: 8000, stdio: 'pipe'
+      });
+      cachedHierarchy = JSON.parse(hierarchyJson);
+      console.log(`[Cache] iOS hierarchy updated in ${Date.now() - start}ms`);
+    } catch (err) {
+      console.log(`[Cache] iOS hierarchy update failed:`, err.message);
+    }
+  } else if (platform === 'android') {
+    try {
+      const adb = getAdbBinary();
+      let dumpSuccess = false;
+      try {
+        require('child_process').execSync(`${adb} shell uiautomator dump /sdcard/window_dump.xml`, { stdio: 'ignore', timeout: 3000 });
+        dumpSuccess = true;
+      } catch (e) {
+        console.log('[Cache] Direct uiautomator dump failed, force stopping maestro and retrying...');
+        require('child_process').execSync(`${adb} shell am force-stop dev.mobile.maestro && ${adb} shell am force-stop dev.mobile.maestro.test`, { stdio: 'ignore' });
+        require('child_process').execSync(`${adb} shell uiautomator dump /sdcard/window_dump.xml`, { stdio: 'ignore', timeout: 3000 });
+        dumpSuccess = true;
+      }
+      if (dumpSuccess) {
+        const xml = require('child_process').execSync(`${adb} exec-out cat /sdcard/window_dump.xml`, { encoding: 'utf-8', maxBuffer: 5 * 1024 * 1024 });
+        cachedHierarchy = xml;
+        console.log(`[Cache] Android hierarchy updated in ${Date.now() - start}ms`);
+      }
+    } catch (err) {
+      console.log(`[Cache] Android hierarchy update failed:`, err.message);
+    }
+  }
+}
+
+async function getOrFetchHierarchy(platform) {
+  if (activeHierarchyFetchPromise) {
+    console.log('[Cache] Waiting for active hierarchy fetch to complete...');
+    await activeHierarchyFetchPromise;
+  }
+  if (!cachedHierarchy || cachedHierarchyPlatform !== platform) {
+    console.log(`[Cache] Cache miss, doing synchronous fetch for ${platform.toUpperCase()}...`);
+    activeHierarchyFetchPromise = updateHierarchyCache(platform);
+    await activeHierarchyFetchPromise;
+    activeHierarchyFetchPromise = null;
+  }
+  return cachedHierarchy;
+}
+
+function triggerBackgroundHierarchyUpdate(platform, delay = 1000) {
+  setTimeout(() => {
+    activeHierarchyFetchPromise = updateHierarchyCache(platform).finally(() => {
+      activeHierarchyFetchPromise = null;
+    });
+  }, delay);
+}
+
+function getAndroidDeviceSize() {
+  if (cachedAndroidDeviceWidth && cachedAndroidDeviceHeight) {
+    return { width: cachedAndroidDeviceWidth, height: cachedAndroidDeviceHeight };
+  }
+  const adb = getAdbBinary();
+  let devW = 1080, devH = 2400;
+  try {
+    const sizeStr = require('child_process').execSync(`${adb} shell wm size`, { encoding: 'utf-8' });
+    const match = sizeStr.match(/(\d+)x(\d+)/);
+    if (match) {
+      devW = parseInt(match[1], 10);
+      devH = parseInt(match[2], 10);
+      cachedAndroidDeviceWidth = devW;
+      cachedAndroidDeviceHeight = devH;
+    }
+  } catch (_) {}
+  return { width: devW, height: devH };
+}
+
 app.get('/api/mobile/screenshot', (req, res) => {
   const platform = lastRecordingPlatform;
   try {
@@ -534,7 +639,7 @@ app.get('/api/mobile/screenshot', (req, res) => {
   }
 });
 
-app.post('/api/mobile/tap', (req, res) => {
+app.post('/api/mobile/tap', async (req, res) => {
   const { normX, normY } = req.body;
   const platform = lastRecordingPlatform;
   const adb = getAdbBinary();
@@ -553,37 +658,36 @@ app.post('/api/mobile/tap', (req, res) => {
         let iosElementId = '';
         let iosElementText = '';
         try {
-          const hierarchyJson = require('child_process').execSync(`${maestroBin}${deviceArg} hierarchy`, {
-            encoding: 'utf-8', timeout: 8000, stdio: 'pipe'
-          });
-          const hierarchy = JSON.parse(hierarchyJson);
-          // iPhone 15 logical resolution (from Maestro bounds)
-          const simW = 390, simH = 844;
-          const tapXLogical = Math.round(normX * simW);
-          const tapYLogical = Math.round(normY * simH);
+          const hierarchy = await getOrFetchHierarchy('ios');
+          if (hierarchy) {
+            // iPhone 15 logical resolution (from Maestro bounds)
+            const simW = 390, simH = 844;
+            const tapXLogical = Math.round(normX * simW);
+            const tapYLogical = Math.round(normY * simH);
 
-          // Flatten all nodes and find the smallest one containing the tap point
-          const allNodes = [];
-          function collectNodes(node) {
-            const attrs = node.attributes || {};
-            const boundsStr = attrs.bounds || '';
-            const m = boundsStr.match(/\[(\d+),(\d+)\]\[(\d+),(\d+)\]/);
-            if (m) {
-              const left = parseInt(m[1]), top = parseInt(m[2]);
-              const right = parseInt(m[3]), bottom = parseInt(m[4]);
-              const area = (right - left) * (bottom - top);
-              if (tapXLogical >= left && tapXLogical <= right && tapYLogical >= top && tapYLogical <= bottom && area > 0) {
-                allNodes.push({ id: attrs['resource-id'] || '', text: attrs['text'] || '', acc: attrs['accessibilityText'] || '', left, top, right, bottom, area });
+            // Flatten all nodes and find the smallest one containing the tap point
+            const allNodes = [];
+            function collectNodes(node) {
+              const attrs = node.attributes || {};
+              const boundsStr = attrs.bounds || '';
+              const m = boundsStr.match(/\[(\d+),(\d+)\]\[(\d+),(\d+)\]/);
+              if (m) {
+                const left = parseInt(m[1]), top = parseInt(m[2]);
+                const right = parseInt(m[3]), bottom = parseInt(m[4]);
+                const area = (right - left) * (bottom - top);
+                if (tapXLogical >= left && tapXLogical <= right && tapYLogical >= top && tapYLogical <= bottom && area > 0) {
+                  allNodes.push({ id: attrs['resource-id'] || '', text: attrs['text'] || '', acc: attrs['accessibilityText'] || '', left, top, right, bottom, area });
+                }
               }
+              (node.children || []).forEach(collectNodes);
             }
-            (node.children || []).forEach(collectNodes);
-          }
-          collectNodes(hierarchy);
-          allNodes.sort((a, b) => a.area - b.area);
-          for (const node of allNodes) {
-            if (node.id && !['login-scaffold'].includes(node.id)) { iosElementId = node.id; break; }
-            if (node.text && node.text.trim()) { iosElementText = node.text.trim(); break; }
-            if (node.acc && node.acc.trim()) { iosElementText = node.acc.trim(); break; }
+            collectNodes(hierarchy);
+            allNodes.sort((a, b) => a.area - b.area);
+            for (const node of allNodes) {
+              if (node.id && !['login-scaffold'].includes(node.id)) { iosElementId = node.id; break; }
+              if (node.text && node.text.trim()) { iosElementText = node.text.trim(); break; }
+              if (node.acc && node.acc.trim()) { iosElementText = node.acc.trim(); break; }
+            }
           }
         } catch (hierarchyErr) {
           console.log('[iOS] Maestro hierarchy failed:', hierarchyErr.message);
@@ -624,57 +728,53 @@ ${stepYaml}`;
         currentCode = currentCode.trimEnd() + '\n' + stepYaml + '\n';
         fs.writeFileSync(outFile, currentCode, 'utf-8');
         const steps = parseCodeToSteps(currentCode, 'yaml');
+
+        // Refresh cache in the background
+        triggerBackgroundHierarchyUpdate('ios', 1000);
+
         return res.json({ success: true, data: { code: currentCode, steps, language: 'yaml' } });
       } catch (iosErr) {
         return res.status(500).json({ success: false, message: 'iOS tap failed: ' + iosErr.message });
       }
     }
 
-
-    let devW = 1080, devH = 2400;
-    try {
-      const sizeStr = require('child_process').execSync(`${adb} shell wm size`, { encoding: 'utf-8' });
-      const match = sizeStr.match(/(\d+)x(\d+)/);
-      if (match) { devW = parseInt(match[1], 10); devH = parseInt(match[2], 10); }
-    } catch (_) {}
-
+    const { width: devW, height: devH } = getAndroidDeviceSize();
     const tapX = Math.round(normX * devW);
     const tapY = Math.round(normY * devH);
 
     let bestNode = null;
     try {
-      require('child_process').execSync(`${adb} shell am force-stop dev.mobile.maestro && ${adb} shell am force-stop dev.mobile.maestro.test`, { stdio: 'ignore' });
-      require('child_process').execSync(`${adb} shell uiautomator dump /sdcard/window_dump.xml`, { stdio: 'ignore', timeout: 5000 });
-      const xml = require('child_process').execSync(`${adb} exec-out cat /sdcard/window_dump.xml`, { encoding: 'utf-8', maxBuffer: 5 * 1024 * 1024 });
-      
-      const regex = /<node\s+([^>]+)>/g;
-      let match;
-      let smallestArea = Infinity;
+      const xml = await getOrFetchHierarchy('android');
+      if (xml) {
+        const regex = /<node\s+([^>]+)>/g;
+        let match;
+        let smallestArea = Infinity;
 
-      while ((match = regex.exec(xml)) !== null) {
-        const attrStr = match[1];
-        const boundsMatch = attrStr.match(/bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/);
-        if (!boundsMatch) continue;
+        while ((match = regex.exec(xml)) !== null) {
+          const attrStr = match[1];
+          const boundsMatch = attrStr.match(/bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/);
+          if (!boundsMatch) continue;
 
-        const left = parseInt(boundsMatch[1], 10);
-        const top = parseInt(boundsMatch[2], 10);
-        const right = parseInt(boundsMatch[3], 10);
-        const bottom = parseInt(boundsMatch[4], 10);
+          const left = parseInt(boundsMatch[1], 10);
+          const top = parseInt(boundsMatch[2], 10);
+          const right = parseInt(boundsMatch[3], 10);
+          const bottom = parseInt(boundsMatch[4], 10);
 
-        if (tapX >= left && tapX <= right && tapY >= top && tapY <= bottom) {
-          const area = (right - left) * (bottom - top);
-          if (area < smallestArea && area > 0) {
-            const textMatch = attrStr.match(/text="([^"]*)"/);
-            const idMatch = attrStr.match(/resource-id="([^"]*)"/);
-            const descMatch = attrStr.match(/content-desc="([^"]*)"/);
-            
-            const text = textMatch ? textMatch[1] : '';
-            const resourceId = idMatch ? idMatch[1] : '';
-            const contentDesc = descMatch ? descMatch[1] : '';
-            
-            if (text || resourceId || contentDesc) {
-              bestNode = { text, resourceId, contentDesc, left, top, right, bottom, area };
-              smallestArea = area;
+          if (tapX >= left && tapX <= right && tapY >= top && tapY <= bottom) {
+            const area = (right - left) * (bottom - top);
+            if (area < smallestArea && area > 0) {
+              const textMatch = attrStr.match(/text="([^"]*)"/);
+              const idMatch = attrStr.match(/resource-id="([^"]*)"/);
+              const descMatch = attrStr.match(/content-desc="([^"]*)"/);
+              
+              const text = textMatch ? textMatch[1] : '';
+              const resourceId = idMatch ? idMatch[1] : '';
+              const contentDesc = descMatch ? descMatch[1] : '';
+              
+              if (text || resourceId || contentDesc) {
+                bestNode = { text, resourceId, contentDesc, left, top, right, bottom, area };
+                smallestArea = area;
+              }
             }
           }
         }
@@ -763,6 +863,10 @@ app.post('/api/mobile/input-text', (req, res) => {
     currentCode = currentCode.trimEnd() + '\n' + stepYaml + '\n';
     fs.writeFileSync(outFile, currentCode, 'utf-8');
     const steps = parseCodeToSteps(currentCode, 'yaml');
+
+    // Trigger update of the cache in background
+    triggerBackgroundHierarchyUpdate(platform, 1000);
+
     return res.json({ success: true, data: { code: currentCode, steps, language: 'yaml' } });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
@@ -812,13 +916,17 @@ app.post('/api/mobile/key', (req, res) => {
     currentCode = currentCode.trimEnd() + '\n' + stepYaml + '\n';
     fs.writeFileSync(outFile, currentCode, 'utf-8');
     const steps = parseCodeToSteps(currentCode, 'yaml');
+
+    // Trigger update of the cache in background
+    triggerBackgroundHierarchyUpdate(platform, 1000);
+
     return res.json({ success: true, data: { code: currentCode, steps, language: 'yaml' } });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
 });
 
-app.post('/api/mobile/assert-screen', (req, res) => {
+app.post('/api/mobile/assert-screen', async (req, res) => {
   const { normX, normY } = req.body;
   const platform = lastRecordingPlatform;
   const adb = getAdbBinary();
@@ -836,37 +944,36 @@ app.post('/api/mobile/assert-screen', (req, res) => {
         let iosElementId = '';
         let iosElementText = '';
         try {
-          const hierarchyJson = require('child_process').execSync(`${maestroBin}${deviceArg} hierarchy`, {
-            encoding: 'utf-8', timeout: 8000, stdio: 'pipe'
-          });
-          const hierarchy = JSON.parse(hierarchyJson);
-          // iPhone 15 logical resolution (from Maestro bounds)
-          const simW = 390, simH = 844;
-          const tapXLogical = Math.round(normX * simW);
-          const tapYLogical = Math.round(normY * simH);
+          const hierarchy = await getOrFetchHierarchy('ios');
+          if (hierarchy) {
+            // iPhone 15 logical resolution (from Maestro bounds)
+            const simW = 390, simH = 844;
+            const tapXLogical = Math.round(normX * simW);
+            const tapYLogical = Math.round(normY * simH);
 
-          // Flatten all nodes and find the smallest one containing the tap point
-          const allNodes = [];
-          function collectNodes(node) {
-            const attrs = node.attributes || {};
-            const boundsStr = attrs.bounds || '';
-            const m = boundsStr.match(/\[(\d+),(\d+)\]\[(\d+),(\d+)\]/);
-            if (m) {
-              const left = parseInt(m[1]), top = parseInt(m[2]);
-              const right = parseInt(m[3]), bottom = parseInt(m[4]);
-              const area = (right - left) * (bottom - top);
-              if (tapXLogical >= left && tapXLogical <= right && tapYLogical >= top && tapYLogical <= bottom && area > 0) {
-                allNodes.push({ id: attrs['resource-id'] || '', text: attrs['text'] || '', acc: attrs['accessibilityText'] || '', left, top, right, bottom, area });
+            // Flatten all nodes and find the smallest one containing the tap point
+            const allNodes = [];
+            function collectNodes(node) {
+              const attrs = node.attributes || {};
+              const boundsStr = attrs.bounds || '';
+              const m = boundsStr.match(/\[(\d+),(\d+)\]\[(\d+),(\d+)\]/);
+              if (m) {
+                const left = parseInt(m[1]), top = parseInt(m[2]);
+                const right = parseInt(m[3]), bottom = parseInt(m[4]);
+                const area = (right - left) * (bottom - top);
+                if (tapXLogical >= left && tapXLogical <= right && tapYLogical >= top && tapYLogical <= bottom && area > 0) {
+                  allNodes.push({ id: attrs['resource-id'] || '', text: attrs['text'] || '', acc: attrs['accessibilityText'] || '', left, top, right, bottom, area });
+                }
               }
+              (node.children || []).forEach(collectNodes);
             }
-            (node.children || []).forEach(collectNodes);
-          }
-          collectNodes(hierarchy);
-          allNodes.sort((a, b) => a.area - b.area);
-          for (const node of allNodes) {
-            if (node.id && !['login-scaffold'].includes(node.id)) { iosElementId = node.id; break; }
-            if (node.text && node.text.trim()) { iosElementText = node.text.trim(); break; }
-            if (node.acc && node.acc.trim()) { iosElementText = node.acc.trim(); break; }
+            collectNodes(hierarchy);
+            allNodes.sort((a, b) => a.area - b.area);
+            for (const node of allNodes) {
+              if (node.id && !['login-scaffold'].includes(node.id)) { iosElementId = node.id; break; }
+              if (node.text && node.text.trim()) { iosElementText = node.text.trim(); break; }
+              if (node.acc && node.acc.trim()) { iosElementText = node.acc.trim(); break; }
+            }
           }
         } catch (hierarchyErr) {
           console.log('[iOS] Maestro hierarchy failed:', hierarchyErr.message);
@@ -892,50 +999,43 @@ app.post('/api/mobile/assert-screen', (req, res) => {
       }
     }
 
-    let devW = 1080, devH = 2400;
-    try {
-      const sizeStr = require('child_process').execSync(`${adb} shell wm size`, { encoding: 'utf-8' });
-      const match = sizeStr.match(/(\d+)x(\d+)/);
-      if (match) { devW = parseInt(match[1], 10); devH = parseInt(match[2], 10); }
-    } catch (_) {}
-
+    const { width: devW, height: devH } = getAndroidDeviceSize();
     const tapX = Math.round(normX * devW);
     const tapY = Math.round(normY * devH);
 
     let bestNode = null;
     try {
-      require('child_process').execSync(`${adb} shell am force-stop dev.mobile.maestro && ${adb} shell am force-stop dev.mobile.maestro.test`, { stdio: 'ignore' });
-      require('child_process').execSync(`${adb} shell uiautomator dump /sdcard/window_dump.xml`, { stdio: 'ignore', timeout: 5000 });
-      const xml = require('child_process').execSync(`${adb} exec-out cat /sdcard/window_dump.xml`, { encoding: 'utf-8', maxBuffer: 5 * 1024 * 1024 });
-      
-      const regex = /<node\s+([^>]+)>/g;
-      let match;
-      let smallestArea = Infinity;
+      const xml = await getOrFetchHierarchy('android');
+      if (xml) {
+        const regex = /<node\s+([^>]+)>/g;
+        let match;
+        let smallestArea = Infinity;
 
-      while ((match = regex.exec(xml)) !== null) {
-        const attrStr = match[1];
-        const boundsMatch = attrStr.match(/bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/);
-        if (!boundsMatch) continue;
+        while ((match = regex.exec(xml)) !== null) {
+          const attrStr = match[1];
+          const boundsMatch = attrStr.match(/bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/);
+          if (!boundsMatch) continue;
 
-        const left = parseInt(boundsMatch[1], 10);
-        const top = parseInt(boundsMatch[2], 10);
-        const right = parseInt(boundsMatch[3], 10);
-        const bottom = parseInt(boundsMatch[4], 10);
+          const left = parseInt(boundsMatch[1], 10);
+          const top = parseInt(boundsMatch[2], 10);
+          const right = parseInt(boundsMatch[3], 10);
+          const bottom = parseInt(boundsMatch[4], 10);
 
-        if (tapX >= left && tapX <= right && tapY >= top && tapY <= bottom) {
-          const area = (right - left) * (bottom - top);
-          if (area < smallestArea && area > 0) {
-            const textMatch = attrStr.match(/text="([^"]*)"/);
-            const idMatch = attrStr.match(/resource-id="([^"]*)"/);
-            const descMatch = attrStr.match(/content-desc="([^"]*)"/);
-            
-            const text = textMatch ? textMatch[1] : '';
-            const resourceId = idMatch ? idMatch[1] : '';
-            const contentDesc = descMatch ? descMatch[1] : '';
-            
-            if (text || resourceId || contentDesc) {
-              bestNode = { text, resourceId, contentDesc, left, top, right, bottom, area };
-              smallestArea = area;
+          if (tapX >= left && tapX <= right && tapY >= top && tapY <= bottom) {
+            const area = (right - left) * (bottom - top);
+            if (area < smallestArea && area > 0) {
+              const textMatch = attrStr.match(/text="([^"]*)"/);
+              const idMatch = attrStr.match(/resource-id="([^"]*)"/);
+              const descMatch = attrStr.match(/content-desc="([^"]*)"/);
+              
+              const text = textMatch ? textMatch[1] : '';
+              const resourceId = idMatch ? idMatch[1] : '';
+              const contentDesc = descMatch ? descMatch[1] : '';
+              
+              if (text || resourceId || contentDesc) {
+                bestNode = { text, resourceId, contentDesc, left, top, right, bottom, area };
+                smallestArea = area;
+              }
             }
           }
         }
