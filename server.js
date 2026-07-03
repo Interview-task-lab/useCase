@@ -68,7 +68,7 @@ async function initDatabase() {
     try {
       await pool.query(`ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS platform VARCHAR(20) DEFAULT 'web'`);
       await pool.query(`ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS app_id VARCHAR(255) DEFAULT ''`);
-    } catch (_) {}
+    } catch (_) { }
     console.log('✅ Database connected & test_cases table ready.');
   } catch (err) {
     console.error('⚠️  Could not connect to PostgreSQL. Test saving will be unavailable.');
@@ -126,7 +126,7 @@ async function ensureAppiumRunning() {
       console.log('✅ Appium server already running on port 4723');
       return;
     }
-  } catch (_) {}
+  } catch (_) { }
 
   // Start Appium as a child process
   console.log('🚀 Starting Appium server on port 4723...');
@@ -151,7 +151,7 @@ async function ensureAppiumRunning() {
         console.log('✅ Appium server is ready');
         return;
       }
-    } catch (_) {}
+    } catch (_) { }
   }
   console.warn('⚠️  Appium may not be fully ready yet');
 }
@@ -175,11 +175,12 @@ async function createWdioSession(platform, appId) {
 
   let capabilities;
   if (platform === 'android') {
+    const pkg = appId || 'com.ismailaslan.flutter_login_app';
     capabilities = {
       platformName: 'Android',
       'appium:automationName': 'UiAutomator2',
-      'appium:appPackage': appId || 'com.ismailaslan.flutterloginapp',
-      'appium:appActivity': '.MainActivity',
+      'appium:appPackage': pkg,
+      'appium:appActivity': pkg + '.MainActivity',
       'appium:noReset': true,
       'appium:newCommandTimeout': 600,
       'appium:uiautomator2ServerInstallTimeout': 60000,
@@ -219,7 +220,7 @@ async function destroyWdioSession() {
   if (wdioSession) {
     try {
       await wdioSession.deleteSession();
-    } catch (_) {}
+    } catch (_) { }
     wdioSession = null;
     wdioSessionPlatform = null;
     wdioSessionAppId = null;
@@ -236,7 +237,7 @@ function getBootedSimulatorUDID() {
         if (device.state === 'Booted') return device.udid;
       }
     }
-  } catch (_) {}
+  } catch (_) { }
   return 'booted';
 }
 
@@ -616,7 +617,7 @@ app.post('/api/record/update-code', (req, res) => {
   const lang = language || lastRecordingLanguage || 'javascript';
   try {
     fs.writeFileSync(getOutputFile(), code, 'utf-8');
-  } catch (_) {}
+  } catch (_) { }
   const steps = parseCodeToSteps(code, lang);
   return res.json({
     success: true,
@@ -856,7 +857,6 @@ app.post('/api/mobile/assert-custom', (req, res) => {
 // ─── API: Stop Mobile Session ────────────────────────────────────────────────
 app.post('/api/mobile/stop', async (req, res) => {
   await destroyWdioSession();
-  lastRecordingPlatform = 'web';
   return res.json({ success: true, message: 'Mobile session stopped.' });
 });
 
@@ -941,7 +941,7 @@ function findElementAtCoords(xmlSource, tapX, tapY, platform) {
         } else if (resourceId && !resourceId.includes('android:id')) {
           let resId = resourceId;
           if (resId.includes(':id/')) resId = resId.split(':id/')[1];
-          selector = `~${resId}`;
+          selector = `//*[contains(@resource-id, "${resId}")]`;
         } else if (text && text.length < 50) {
           selector = `//*[@text="${text}"]`;
         }
@@ -968,7 +968,7 @@ function findFocusedElementSelector(xmlSource, platform) {
       if (idMatch) {
         let resId = idMatch[1];
         if (resId.includes(':id/')) resId = resId.split(':id/')[1];
-        return `~${resId}`;
+        return `//*[contains(@resource-id, "${resId}")]`;
       }
     }
   }
@@ -1122,8 +1122,8 @@ app.post('/api/test-cases/:id/run', async (req, res) => {
         generateMobileReport(reportDir, tc, runnerOutput, code);
 
         // Clean up temporary files
-        try { fs.unlinkSync(testFile); } catch (_) {}
-        try { fs.unlinkSync(wdioConfigFile); } catch (_) {}
+        try { fs.unlinkSync(testFile); } catch (_) { }
+        try { fs.unlinkSync(wdioConfigFile); } catch (_) { }
       });
 
       return res.json({
@@ -1193,8 +1193,8 @@ module.exports = defineConfig({
         runnerState = 'completed';
         runnerProcess = null;
 
-        try { fs.unlinkSync(testFile); } catch (_) {}
-        try { fs.unlinkSync(configFile); } catch (_) {}
+        try { fs.unlinkSync(testFile); } catch (_) { }
+        try { fs.unlinkSync(configFile); } catch (_) { }
       });
 
       return res.json({
@@ -1282,15 +1282,56 @@ ${body}
 `;
 }
 
-// ─── Helper: Convert mobile code to WDIO test format ─────────────────────────
 function convertToWdioTest(code, testName, platform, appId) {
-  const safeName = testName.replace(/'/g, "\\'");
+  const targetAppId = appId || 'com.ismailaslan.flutter_login_app';
+  const cleanStart = `    // Clean launch the app: terminate first if running, then activate
+    try { await driver.terminateApp('${targetAppId}'); } catch (_) {}
+    await driver.activateApp('${targetAppId}');
+    await driver.pause(3000);`;
 
-  // Extract action lines (lines starting with await)
   const lines = code.split('\n');
   const bodyLines = [];
-  for (const line of lines) {
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    // Check for click followed by keys
+    if (trimmed.startsWith('await $(') && (trimmed.endsWith(').click();') || trimmed.endsWith(').click()'))) {
+      let foundKeys = false;
+      let keysText = '';
+      let keysIndex = -1;
+
+      for (let j = i + 1; j < lines.length; j++) {
+        const nextTrimmed = lines[j].trim();
+        if (!nextTrimmed) continue;
+        if (nextTrimmed.startsWith('await driver.keys(')) {
+          const match = nextTrimmed.match(/await driver\.keys\(['"](.*)['"]\)/);
+          if (match) {
+            keysText = match[1];
+            foundKeys = true;
+            keysIndex = j;
+          }
+          break;
+        } else if (nextTrimmed.startsWith('//') || nextTrimmed.startsWith('await driver.pause(')) {
+          continue;
+        } else {
+          break;
+        }
+      }
+
+      if (foundKeys) {
+        const selectorMatch = trimmed.match(/await \$\((['"`].*?['"`])\)/);
+        if (selectorMatch) {
+          const selectorStr = selectorMatch[1];
+          bodyLines.push(`    await $(${selectorStr}).setValue('${keysText}');`);
+          lines[keysIndex] = ''; // skip this line
+          continue;
+        }
+      }
+    }
+
     if (trimmed.startsWith('await ') || trimmed.startsWith('expect(') || trimmed.startsWith('await expect(')) {
       bodyLines.push(`    ${trimmed}`);
     } else if (trimmed.startsWith('//') && bodyLines.length > 0) {
@@ -1298,11 +1339,10 @@ function convertToWdioTest(code, testName, platform, appId) {
     }
   }
 
+  const safeName = testName.replace(/'/g, "\\'");
   return `describe('${safeName}', () => {
   it('should execute mobile test', async () => {
-    // Activate the app
-    await driver.activateApp('${appId || 'com.ismailaslan.flutterloginapp'}');
-    await driver.pause(2000);
+${cleanStart}
 
 ${bodyLines.join('\n')}
   });
@@ -1320,7 +1360,7 @@ function generateWdioConfig(testFile, platform, appId, reportDir) {
       platformName: 'Android',
       'appium:automationName': 'UiAutomator2',
       'appium:appPackage': '${appId || 'com.ismailaslan.flutterloginapp'}',
-      'appium:appActivity': '.MainActivity',
+      'appium:appActivity': '${appId || 'com.ismailaslan.flutterloginapp'}.MainActivity',
       'appium:noReset': true,
       'appium:newCommandTimeout': 300,
     }`;
@@ -1341,7 +1381,7 @@ function generateWdioConfig(testFile, platform, appId, reportDir) {
   hostname: '127.0.0.1',
   port: 4723,
   path: '/',
-  specs: ['./' + path.basename(testFile)],
+  specs: ['./${path.basename(testFile)}'],
   maxInstances: 1,
   capabilities: [${capabilities}],
   framework: 'mocha',
